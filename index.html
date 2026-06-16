@@ -4,12 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
-  <meta name="description" content="K8 云端退货处理系统，支持独立账号、电脑手机同步与私有照片存储" />
+  <meta name="description" content="K8 云端退货处理系统，支持独立账号、跨账户共享、查看/编辑权限与云端照片" />
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="styles.css" />
-  <title>K8 退货处理系统 V8.1 云端账户版</title>
+  <title>K8 退货处理系统 V9 共享权限版</title>
 </head>
 <body>
 
@@ -157,6 +157,7 @@
         <option value="done">已完成</option>
       </select>
       <button id="exportBtn" class="secondary-btn">导出 CSV</button>
+      <button id="shareInvitationsBtn" class="secondary-btn invitation-button">共享邀请 <span id="invitationCount" class="count-badge hidden">0</span></button>
       <button id="newSingleBtn" class="secondary-btn">＋ 新建退货单</button>
       <button id="newBatchBtn" class="primary-btn">＋ 批量新建退货单</button>
     </section>
@@ -331,6 +332,53 @@
   </dialog>
 
 
+
+  <dialog id="shareDialog" class="share-dialog">
+    <div class="dialog-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">SHARE RETURN ORDER</p>
+          <h2>共享退货单</h2>
+          <p id="shareBatchName" class="muted"></p>
+        </div>
+        <button type="button" class="icon-btn" data-close="shareDialog" aria-label="关闭">×</button>
+      </div>
+
+      <form id="shareForm" class="share-form">
+        <label class="field">
+          对方注册邮箱
+          <input name="recipientEmail" type="email" required placeholder="client@example.com" autocomplete="email" />
+        </label>
+        <label class="field">
+          权限
+          <select name="permission">
+            <option value="view">仅查看</option>
+            <option value="edit">可以编辑</option>
+          </select>
+        </label>
+        <button id="sendShareBtn" class="primary-btn" type="submit">发送共享申请</button>
+      </form>
+
+      <p class="share-help">对方必须先注册账户。申请发送后，对方接受邀请才会看到这张退货单。</p>
+      <div class="share-list-head"><strong>已发送的共享</strong></div>
+      <div id="shareList" class="share-list"></div>
+    </div>
+  </dialog>
+
+  <dialog id="invitationDialog" class="invitation-dialog">
+    <div class="dialog-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">SHARED WITH ME</p>
+          <h2>共享邀请</h2>
+          <p class="muted">接受后，这张退货单会出现在你的工作台。</p>
+        </div>
+        <button type="button" class="icon-btn" data-close="invitationDialog" aria-label="关闭">×</button>
+      </div>
+      <div id="invitationList" class="invitation-list"></div>
+    </div>
+  </dialog>
+
   <dialog id="photoPreviewDialog" class="photo-preview-dialog">
     <div class="photo-preview-shell">
       <button id="closePhotoPreviewBtn" class="photo-preview-close" type="button" aria-label="关闭预览">×</button>
@@ -367,6 +415,7 @@
       <div class="batch-card-main">
         <div class="batch-topline">
           <span class="status-pill"></span>
+          <span class="access-pill hidden"></span>
           <span class="batch-id"></span>
         </div>
         <h3 class="batch-name"></h3>
@@ -382,6 +431,8 @@
         <small class="batch-step-label"></small>
         <button class="open-batch-btn primary-btn">开始处理</button>
         <button class="export-batch-btn secondary-btn">导出 Excel 表格</button>
+        <button class="share-batch-btn secondary-btn">共享权限</button>
+        <button class="delete-card-btn danger-btn">删除退货单</button>
       </div>
     </article>
   </template>
@@ -390,7 +441,7 @@
 
   <script src="jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="supabase-config.js?v=8.1.0"></script>
-  <script src="app.js?v=8.1.0"></script>
+  <script src="supabase-config.js?v=9.0.0"></script>
+  <script src="app.js?v=9.0.0"></script>
 </body>
 </html>

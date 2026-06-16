@@ -1,7 +1,7 @@
 {
-  "name": "K8 退货处理系统 V8 云端账户版",
-  "short_name": "K8云端退货",
-  "description": "独立账户、云端数据、私有照片和电脑手机同步",
+  "name": "K8 退货处理系统 V9 共享权限版",
+  "short_name": "K8共享退货",
+  "description": "跨账户共享退货单，支持仅查看和可编辑权限",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#f3f5f8",

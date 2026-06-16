@@ -1,16 +1,6 @@
-K8 V8.1 Supabase缓存修复补丁
+V9跨账户共享补丁
 
-只需要把以下3个文件复制到本地GitHub仓库根目录并选择“替换”：
-
-1. index.html
-2. service-worker.js
-3. vercel.json
-
-不要替换你已经配置好的 supabase-config.js。
-
-替换后：
-- GitHub Desktop填写 Summary: Fix Supabase config cache
-- Commit to main
-- Push origin
-- 等待Vercel显示Ready
-- 使用无痕窗口打开网站测试
+1. 先在Supabase SQL Editor运行 supabase-setup-v9.sql。
+2. 将其余文件复制到GitHub本地仓库根目录并替换。
+3. 不要覆盖现有的 supabase-config.js。
+4. Commit to main → Push origin → 等待Vercel Ready。

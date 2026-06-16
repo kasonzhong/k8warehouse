@@ -9,6 +9,7 @@
   const PHOTO_STORE = 'photos';
   const MIN_PHOTOS = 2;
   const CLOUD_TABLE = 'return_batches';
+  const SHARE_TABLE = 'return_batch_shares';
   const DEFAULT_PHOTO_BUCKET = 'return-photos';
   const CLOUD_CACHE_PREFIX = 'k8-cloud-cache-v8-';
   const LOCAL_IMPORT_MARK_PREFIX = 'k8-local-import-v8-';
@@ -31,6 +32,9 @@
   let cloudSyncRunning = false;
   let cloudKnownIds = new Set();
   let appStartedForUserId = null;
+  let pendingInvitations = [];
+  let activeShareBatchId = null;
+  let shareRefreshTimer = null;
 
   document.addEventListener('DOMContentLoaded', () => {
     init().catch(error => {
@@ -56,7 +60,7 @@
       'logoutBtn', 'refreshCloudBtn', 'cloudStatus', 'syncDot',
       'userDisplayName', 'userEmail', 'userAvatar',
       'statPending', 'statActive', 'statReview', 'statDone',
-      'searchInput', 'statusFilter', 'exportBtn', 'newSingleBtn', 'newBatchBtn',
+      'searchInput', 'statusFilter', 'exportBtn', 'shareInvitationsBtn', 'invitationCount', 'newSingleBtn', 'newBatchBtn',
       'emptyNewBtn', 'floatingAddBtn', 'batchList', 'emptyState',
       'mobileCreateDialog', 'mobileNewSingleBtn', 'mobileNewBatchBtn',
       'newSingleDialog', 'newSingleForm', 'singleDateInput',
@@ -65,6 +69,8 @@
       'batchMeta', 'reviewBatchBtn', 'deleteBatchBtn',
       'batchProgressBar', 'batchProgressText', 'addItemsBtn',
       'itemList', 'batchMain', 'photoPreviewDialog', 'photoPreviewImage',
+      'shareDialog', 'shareForm', 'shareBatchName', 'shareList', 'sendShareBtn',
+      'invitationDialog', 'invitationList',
       'closePhotoPreviewBtn', 'labelDialog', 'labelSku',
       'labelItemId', 'labelTracking', 'labelDate', 'printLabelBtn',
       'batchCardTemplate'
@@ -112,6 +118,8 @@
     els.searchInput.addEventListener('input', renderBatches);
     els.statusFilter.addEventListener('change', renderBatches);
     els.exportBtn.addEventListener('click', exportCSV);
+    els.shareInvitationsBtn.addEventListener('click', openInvitationDialog);
+    els.shareForm.addEventListener('submit', sendShareInvitation);
     els.closeBatchBtn.addEventListener('click', closeBatch);
     els.deleteBatchBtn.addEventListener('click', deleteActiveBatch);
     els.addItemsBtn.addEventListener('click', addItemsToActiveBatch);
@@ -199,6 +207,11 @@
   function normaliseBatches() {
     batches.forEach(batch => {
       batch.items = Array.isArray(batch.items) ? batch.items : [];
+      batch._ownerId = batch._ownerId || currentUser?.id || null;
+      batch._accessRole = batch._accessRole || (batch._ownerId === currentUser?.id ? 'owner' : 'viewer');
+      batch._ownerName = batch._ownerName || '';
+      batch._ownerEmail = batch._ownerEmail || '';
+      batch._dirty = !!batch._dirty;
       batch.orderType = batch.orderType || 'batch';
       batch.name = String(batch.name || `${batch.client || '客户'}（${formatDateOnly(batch.date || toDateInput(new Date()))}）${batch.orderType === 'single' ? '退货单' : '批量退货单'}`)
         .replaceAll('退货处理文件夹', '退货单')
@@ -274,6 +287,8 @@
   }
 
   function saveBatches() {
+    const active = getActiveBatch();
+    if (active && canEditBatch(active)) active._dirty = true;
     saveLocalCloudCache();
     if (!currentUser || !supabaseClient) return;
 
@@ -304,6 +319,9 @@
 
     const order = {
       id: makeBatchId(),
+      _ownerId: currentUser?.id || null,
+      _accessRole: 'owner',
+      _dirty: true,
       orderType: 'single',
       client,
       date,
@@ -335,6 +353,9 @@
     const now = new Date().toISOString();
     const batch = {
       id: makeBatchId(),
+      _ownerId: currentUser?.id || null,
+      _accessRole: 'owner',
+      _dirty: true,
       orderType: 'batch',
       client,
       date,
@@ -417,9 +438,22 @@
 
       fragment.querySelector('.status-pill').textContent = status.label;
       fragment.querySelector('.status-pill').classList.add(status.key);
+      const accessPill = fragment.querySelector('.access-pill');
+      if (batch._accessRole && batch._accessRole !== 'owner') {
+        accessPill.classList.remove('hidden');
+        accessPill.classList.add(batch._accessRole === 'editor' ? 'edit' : 'view');
+        accessPill.textContent = batch._accessRole === 'editor' ? '共享给我 · 可编辑' : '共享给我 · 仅查看';
+      } else {
+        accessPill.classList.remove('hidden');
+        accessPill.classList.add('owner');
+        accessPill.textContent = '我创建的';
+      }
       fragment.querySelector('.batch-id').textContent = batch.id;
       fragment.querySelector('.batch-name').textContent = batch.name;
       fragment.querySelector('.batch-note').textContent = batch.notes || '无退货单备注';
+      if (batch._accessRole !== 'owner' && batch._ownerName) {
+        fragment.querySelector('.batch-note').textContent = `由 ${batch._ownerName} 共享 · ${batch.notes || '无退货单备注'}`;
+      }
       fragment.querySelector('.batch-count').textContent = `${ready}/${batch.items.length} 件已处理`;
       fragment.querySelector('.batch-inspection').textContent =
         `${batch.orderType === 'single' ? '单件退货单' : '批量退货单'} · ${batch.inspectionRequired ? '包含分拣质检' : '快速处理模式'}`;
@@ -434,6 +468,7 @@
       fragment.querySelector('.open-batch-btn').textContent =
         batch.completedAt ? '查看记录'
         : status.key === 'review' ? '查看记录'
+        : batch._accessRole === 'viewer' ? '查看记录'
         : ready ? '继续处理' : '开始处理';
 
       card.addEventListener('click', event => {
@@ -444,6 +479,21 @@
         event.stopPropagation();
         exportBatchExcel(batch.id, event.currentTarget);
       });
+      const shareButton = fragment.querySelector('.share-batch-btn');
+      const deleteButton = fragment.querySelector('.delete-card-btn');
+      if (isBatchOwner(batch)) {
+        shareButton.addEventListener('click', event => {
+          event.stopPropagation();
+          openShareDialog(batch.id);
+        });
+        deleteButton.addEventListener('click', event => {
+          event.stopPropagation();
+          deleteBatchFromCard(batch.id);
+        });
+      } else {
+        shareButton.classList.add('hidden');
+        deleteButton.classList.add('hidden');
+      }
       els.batchList.appendChild(fragment);
     });
 
@@ -499,7 +549,7 @@
     const batch = getActiveBatch();
     const firstIncomplete = batch.items.findIndex(item => !isItemReady(item, batch));
     activeItemIndex = firstIncomplete >= 0 ? firstIncomplete : 0;
-    viewMode = batch.completedAt || firstIncomplete < 0 ? 'review' : 'process';
+    viewMode = !canEditBatch(batch) || batch.completedAt || firstIncomplete < 0 ? 'review' : 'process';
     els.batchDialog.showModal();
     document.body.classList.add('dialog-open');
     requestWakeLock();
@@ -536,7 +586,10 @@
     els.batchTitle.textContent = batch.name;
     els.batchMeta.textContent =
       `${batch.orderType === 'single' ? '单件退货单' : '批量退货单'} · ${batch.items.length} 件 · ${batch.inspectionRequired ? '需要分拣质检' : '快速处理模式'}${batch.notes ? ` · ${batch.notes}` : ''}`;
-    els.addItemsBtn.classList.toggle('hidden', batch.orderType === 'single');
+    els.addItemsBtn.classList.toggle('hidden', batch.orderType === 'single' || !canEditBatch(batch));
+    els.deleteBatchBtn.classList.toggle('hidden', !isBatchOwner(batch));
+    els.reviewBatchBtn.classList.toggle('hidden', !canEditBatch(batch));
+    els.batchDialog.classList.toggle('readonly-mode', !canEditBatch(batch));
     els.batchProgressBar.style.width = `${progress}%`;
     els.batchProgressText.textContent =
       batch.completedAt
@@ -614,6 +667,7 @@
   }
 
   async function deleteReturnItem(index) {
+    if (!canEditBatch(getActiveBatch())) { showToast('你没有编辑权限'); return; }
     persistActiveItemFields();
     const batch = getActiveBatch();
     const item = batch?.items[index];
@@ -633,7 +687,7 @@
     if (deletingLast) {
       batches = batches.filter(candidate => candidate.id !== batch.id);
       saveLocalCloudCache();
-      await deleteBatchFromCloud(batch.id);
+      await deleteBatchFromCloud(batch.id, batch._ownerId);
       stopCamera();
       if (els.batchDialog.open) els.batchDialog.close();
       activeBatchId = null;
@@ -865,6 +919,8 @@
 
   function persistActiveItemFields() {
     if (!activeBatchId || viewMode !== 'process') return;
+    const permissionBatch = getActiveBatch();
+    if (!canEditBatch(permissionBatch)) return;
     const batch = getActiveBatch();
     const item = getActiveItem();
     if (!batch || !item || !document.getElementById('skuInput')) return;
@@ -1405,6 +1461,7 @@
 
     els.batchMain.innerHTML = `
       <section class="review-page">
+        ${batch._accessRole !== 'owner' ? `<div class="permission-banner">${batch._accessRole === 'editor' ? `此退货单由 ${escapeHtml(batch._ownerName || '其他用户')} 共享给你，你可以查看和编辑。` : `此退货单由 ${escapeHtml(batch._ownerName || '其他用户')} 共享给你，你只有查看权限。`}</div>` : ''}
         <div class="review-head">
           <div>
             <h3>批次统一复核</h3>
@@ -1425,7 +1482,7 @@
         <div class="review-footer">
           <span>${allReady ? '全部退货任务均已达到完成条件。' : '仍有任务未完成，请返回对应退货任务补充资料。'}</span>
           <button id="confirmBatchBtn" class="primary-btn" type="button"
-            ${!allReady || batch.completedAt ? 'disabled' : ''}>
+            ${!allReady || batch.completedAt || !canEditBatch(batch) ? 'disabled' : ''}>
             ${batch.completedAt ? '已确认完成' : '确认全部任务完成'}
           </button>
         </div>
@@ -1468,7 +1525,9 @@
         <div class="review-photos" data-item-index="${index}"></div>
       `;
 
-      card.querySelector('.edit-item-btn').addEventListener('click', () => {
+      const editButton = card.querySelector('.edit-item-btn');
+      if (!canEditBatch(batch)) editButton.classList.add('hidden');
+      editButton.addEventListener('click', () => {
         batch.completedAt = null;
         activeItemIndex = index;
         viewMode = 'process';
@@ -1583,6 +1642,7 @@
 
   async function deleteActiveBatch() {
     const batch = getActiveBatch();
+    if (!isBatchOwner(batch)) { showToast('只有创建者可以删除整张退货单'); return; }
     if (!batch || !confirm(`确定删除退货单“${batch.name}”？其中所有退货任务和照片都会删除。`)) return;
 
     for (const item of batch.items) {
@@ -1593,7 +1653,7 @@
 
     batches = batches.filter(candidate => candidate.id !== batch.id);
     saveLocalCloudCache();
-    await deleteBatchFromCloud(batch.id);
+    await deleteBatchFromCloud(batch.id, batch._ownerId);
     closeBatch();
     showToast('退货单已删除');
   }
@@ -2317,13 +2377,15 @@
     if (!currentUser) {
       return `${itemId}-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`;
     }
+    const batch = getActiveBatch();
+    const ownerId = batch?._ownerId || currentUser.id;
     const batchId = activeBatchId || 'unassigned';
     const filename = `${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`;
-    return `${currentUser.id}/${batchId}/${itemId}/${filename}`;
+    return `${ownerId}/${batchId}/${itemId}/${filename}`;
   }
 
   function isCloudPhotoPath(id) {
-    return !!currentUser && String(id || '').startsWith(`${currentUser.id}/`);
+    return !!currentUser && String(id || '').includes('/');
   }
 
   function getPhotoBucket() {
@@ -2678,10 +2740,11 @@
     if (!currentUser || !supabaseClient) return;
 
     const openBatchId = options.preserveOpenBatch ? activeBatchId : null;
-    els.batchList.innerHTML =
-      '<div class="cloud-loading"><strong>正在读取云端退货数据</strong><span>请稍候…</span></div>';
-    els.emptyState.classList.add('hidden');
-    setCloudStatus('syncing', '正在读取云端数据…');
+    if (!options.silent) {
+      els.batchList.innerHTML = '<div class="cloud-loading"><strong>正在读取云端退货数据</strong><span>请稍候…</span></div>';
+      els.emptyState.classList.add('hidden');
+      setCloudStatus('syncing', '正在读取云端数据…');
+    }
 
     if (!navigator.onLine) {
       batches = readLocalCloudCache();
@@ -2691,11 +2754,7 @@
       return;
     }
 
-    const { data, error } = await supabaseClient
-      .from(CLOUD_TABLE)
-      .select('id,payload,updated_at')
-      .order('updated_at', { ascending: false });
-
+    const { data, error } = await supabaseClient.rpc('list_accessible_return_batches');
     if (error) {
       console.error(error);
       const cache = readLocalCloudCache();
@@ -2712,13 +2771,19 @@
       return;
     }
 
-    batches = (data || [])
-      .map(row => row.payload)
-      .filter(Boolean);
+    batches = (data || []).map(row => ({
+      ...(row.payload || {}),
+      _ownerId: row.user_id,
+      _accessRole: row.access_role || 'viewer',
+      _ownerName: row.owner_name || '',
+      _ownerEmail: row.owner_email || '',
+      _dirty: false
+    }));
     normaliseBatches();
-    cloudKnownIds = new Set(batches.map(batch => batch.id));
+    cloudKnownIds = new Set(batches.map(batch => `${batch._ownerId}:${batch.id}`));
     saveLocalCloudCache();
     renderBatches();
+    await loadPendingInvitations();
     setCloudStatus('online', '云端已同步');
 
     if (openBatchId && batches.some(batch => batch.id === openBatchId)) {
@@ -2735,27 +2800,27 @@
       return;
     }
 
+    const dirty = batches.filter(batch => canEditBatch(batch) && batch._dirty);
+    if (!dirty.length) {
+      setCloudStatus('online', '所有修改已同步');
+      return;
+    }
+
     cloudSyncRunning = true;
     setCloudStatus('syncing', '正在同步云端…');
-
     try {
-      if (batches.length) {
-        const rows = batches.map(batch => ({
-          user_id: currentUser.id,
-          id: batch.id,
-          payload: batch,
-          created_at: batch.createdAt || new Date().toISOString(),
-          updated_at: batch.updatedAt || new Date().toISOString()
-        }));
-
-        const { error } = await supabaseClient
-          .from(CLOUD_TABLE)
-          .upsert(rows, { onConflict: 'user_id,id' });
-
+      for (const batch of dirty) {
+        const { error } = await supabaseClient.rpc('save_return_batch', {
+          p_owner_id: batch._ownerId || currentUser.id,
+          p_batch_id: batch.id,
+          p_payload: serialiseBatchForCloud(batch),
+          p_created_at: batch.createdAt || new Date().toISOString(),
+          p_updated_at: batch.updatedAt || new Date().toISOString()
+        });
         if (error) throw error;
-        cloudKnownIds = new Set(batches.map(batch => batch.id));
+        batch._dirty = false;
+        cloudKnownIds.add(`${batch._ownerId || currentUser.id}:${batch.id}`);
       }
-
       saveLocalCloudCache();
       setCloudStatus('online', '所有修改已同步');
     } catch (error) {
@@ -2766,96 +2831,229 @@
     }
   }
 
-  async function deleteBatchFromCloud(batchId) {
+  async function deleteBatchFromCloud(batchId, ownerId = currentUser?.id) {
     if (!currentUser || !supabaseClient || !navigator.onLine) {
-      cloudKnownIds.delete(batchId);
-      setCloudStatus('offline', '离线删除尚未同步');
-      return;
+      setCloudStatus('offline', '离线时不能删除云端退货单');
+      throw new Error('请联网后再删除');
     }
-
-    const { error } = await supabaseClient
-      .from(CLOUD_TABLE)
-      .delete()
-      .eq('id', batchId);
-
+    const { error } = await supabaseClient.rpc('delete_return_batch', {
+      p_owner_id: ownerId,
+      p_batch_id: batchId
+    });
     if (error) {
       setCloudStatus('error', `云端删除失败：${error.message}`);
       throw error;
     }
-
-    cloudKnownIds.delete(batchId);
+    cloudKnownIds.delete(`${ownerId}:${batchId}`);
     setCloudStatus('online', '云端已同步');
   }
 
   function subscribeToCloudChanges() {
     unsubscribeFromCloudChanges();
     if (!currentUser || !supabaseClient) return;
-
     realtimeChannel = supabaseClient
-      .channel(`return-batches-${currentUser.id}`)
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: CLOUD_TABLE,
-          filter: `user_id=eq.${currentUser.id}`
-        },
-        handleCloudChange
-      )
+      .channel(`return-sharing-${currentUser.id}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: CLOUD_TABLE }, scheduleCloudRefresh)
+      .on('postgres_changes', { event: '*', schema: 'public', table: SHARE_TABLE }, scheduleCloudRefresh)
       .subscribe(status => {
-        if (status === 'SUBSCRIBED') {
-          setCloudStatus('online', '云端实时同步已开启');
-        }
+        if (status === 'SUBSCRIBED') setCloudStatus('online', '云端实时同步已开启');
       });
   }
 
   function unsubscribeFromCloudChanges() {
-    if (realtimeChannel && supabaseClient) {
-      supabaseClient.removeChannel(realtimeChannel);
-    }
+    if (realtimeChannel && supabaseClient) supabaseClient.removeChannel(realtimeChannel);
     realtimeChannel = null;
   }
 
-  function handleCloudChange(change) {
-    if (!currentUser) return;
+  function scheduleCloudRefresh() {
+    clearTimeout(shareRefreshTimer);
+    shareRefreshTimer = setTimeout(() => {
+      loadCloudBatches({ preserveOpenBatch: true, silent: true });
+    }, 600);
+  }
 
-    if (change.eventType === 'DELETE') {
-      const id = change.old?.id;
-      if (!id) return;
-      const index = batches.findIndex(batch => batch.id === id);
-      if (index >= 0) batches.splice(index, 1);
-      if (activeBatchId === id && els.batchDialog.open) {
-        els.batchDialog.close();
-        activeBatchId = null;
-        showToast('这张退货单已在另一台设备删除');
+  function handleCloudChange() {
+    scheduleCloudRefresh();
+  }
+
+
+  function isBatchOwner(batch) {
+    return !!batch && batch._ownerId === currentUser?.id && batch._accessRole === 'owner';
+  }
+
+  function canEditBatch(batch) {
+    return !!batch && (isBatchOwner(batch) || batch._accessRole === 'editor');
+  }
+
+  function serialiseBatchForCloud(batch) {
+    const copy = JSON.parse(JSON.stringify(batch));
+    Object.keys(copy).filter(key => key.startsWith('_')).forEach(key => delete copy[key]);
+    return copy;
+  }
+
+  async function deleteBatchFromCard(batchId) {
+    const batch = batches.find(item => item.id === batchId);
+    if (!isBatchOwner(batch)) return;
+    if (!confirm(`确定删除退货单“${batch.name}”？照片和共享权限也会一并删除。`)) return;
+    try {
+      for (const item of batch.items || []) {
+        for (const photoId of item.photos || []) await deletePhoto(photoId);
       }
+      await deleteBatchFromCloud(batch.id, batch._ownerId);
+      batches = batches.filter(item => item !== batch);
       saveLocalCloudCache();
       renderBatches();
+      showToast('退货单已删除');
+    } catch (error) {
+      showToast(error.message || '删除失败');
+    }
+  }
+
+  async function openShareDialog(batchId) {
+    const batch = batches.find(item => item.id === batchId);
+    if (!isBatchOwner(batch)) return;
+    activeShareBatchId = batchId;
+    els.shareBatchName.textContent = batch.name;
+    els.shareForm.reset();
+    els.shareDialog.showModal();
+    await loadBatchShares();
+  }
+
+  async function sendShareInvitation(event) {
+    event.preventDefault();
+    const batch = batches.find(item => item.id === activeShareBatchId);
+    if (!isBatchOwner(batch)) return;
+    const form = new FormData(els.shareForm);
+    const email = String(form.get('recipientEmail') || '').trim();
+    const permission = String(form.get('permission') || 'view');
+    els.sendShareBtn.disabled = true;
+    els.sendShareBtn.textContent = '正在发送…';
+    const { error } = await supabaseClient.rpc('invite_return_batch', {
+      p_batch_id: batch.id,
+      p_recipient_email: email,
+      p_permission: permission
+    });
+    els.sendShareBtn.disabled = false;
+    els.sendShareBtn.textContent = '发送共享申请';
+    if (error) {
+      showToast(translateShareError(error.message));
       return;
     }
+    els.shareForm.reset();
+    showToast('共享申请已发送');
+    await loadBatchShares();
+  }
 
-    const remote = change.new?.payload;
-    if (!remote?.id) return;
-
-    const index = batches.findIndex(batch => batch.id === remote.id);
-    const local = index >= 0 ? batches[index] : null;
-    const remoteTime = new Date(remote.updatedAt || 0).getTime();
-    const localTime = new Date(local?.updatedAt || 0).getTime();
-
-    if (local && remoteTime <= localTime) return;
-
-    if (index >= 0) batches[index] = remote;
-    else batches.unshift(remote);
-
-    normaliseBatches();
-    saveLocalCloudCache();
-    renderBatches();
-
-    if (activeBatchId === remote.id && els.batchDialog.open) {
-      renderBatch();
-      showToast('已同步另一台设备的更新');
+  async function loadBatchShares() {
+    if (!activeShareBatchId) return;
+    els.shareList.innerHTML = '<div class="cloud-loading">正在读取共享记录…</div>';
+    const { data, error } = await supabaseClient.rpc('list_return_batch_shares', {
+      p_batch_id: activeShareBatchId
+    });
+    if (error) {
+      els.shareList.innerHTML = `<p class="muted">读取失败：${escapeHtml(error.message)}</p>`;
+      return;
     }
+    els.shareList.innerHTML = '';
+    if (!data?.length) {
+      els.shareList.innerHTML = '<p class="muted">尚未共享给其他账户。</p>';
+      return;
+    }
+    data.forEach(share => {
+      const row = document.createElement('div');
+      row.className = 'share-row';
+      row.innerHTML = `
+        <div class="share-row-info">
+          <strong>${escapeHtml(share.recipient_name || share.recipient_email)}</strong>
+          <small>${escapeHtml(share.recipient_email)}</small>
+          <span class="share-status ${escapeHtml(share.status)}">${share.status === 'accepted' ? '已接受' : share.status === 'rejected' ? '已拒绝' : '等待接受'}</span>
+        </div>
+        <div class="share-actions">
+          <select class="share-permission-select">
+            <option value="view" ${share.permission === 'view' ? 'selected' : ''}>仅查看</option>
+            <option value="edit" ${share.permission === 'edit' ? 'selected' : ''}>可编辑</option>
+          </select>
+          <button class="secondary-btn revoke-share-btn" type="button">取消共享</button>
+        </div>`;
+      row.querySelector('.share-permission-select').addEventListener('change', async event => {
+        const { error: updateError } = await supabaseClient.rpc('set_return_batch_share_permission', {
+          p_share_id: share.id,
+          p_permission: event.target.value
+        });
+        if (updateError) showToast(updateError.message); else showToast('权限已更新');
+      });
+      row.querySelector('.revoke-share-btn').addEventListener('click', async () => {
+        if (!confirm(`确定取消与 ${share.recipient_email} 的共享吗？`)) return;
+        const { error: revokeError } = await supabaseClient.rpc('revoke_return_batch_share', { p_share_id: share.id });
+        if (revokeError) showToast(revokeError.message); else { showToast('共享已取消'); await loadBatchShares(); }
+      });
+      els.shareList.appendChild(row);
+    });
+  }
+
+  async function loadPendingInvitations() {
+    if (!supabaseClient || !currentUser) return;
+    const { data, error } = await supabaseClient.rpc('list_pending_return_batch_invitations');
+    if (error) {
+      console.warn('Invitation load failed:', error);
+      return;
+    }
+    pendingInvitations = data || [];
+    els.invitationCount.textContent = String(pendingInvitations.length);
+    els.invitationCount.classList.toggle('hidden', pendingInvitations.length === 0);
+  }
+
+  async function openInvitationDialog() {
+    await loadPendingInvitations();
+    renderInvitationList();
+    els.invitationDialog.showModal();
+  }
+
+  function renderInvitationList() {
+    els.invitationList.innerHTML = '';
+    if (!pendingInvitations.length) {
+      els.invitationList.innerHTML = '<p class="muted">目前没有等待处理的共享邀请。</p>';
+      return;
+    }
+    pendingInvitations.forEach(invite => {
+      const row = document.createElement('div');
+      row.className = 'invitation-row';
+      row.innerHTML = `
+        <div class="invitation-row-info">
+          <strong>${escapeHtml(invite.batch_name || invite.batch_id)}</strong>
+          <small>${escapeHtml(invite.owner_name || invite.owner_email)} 邀请你 · ${invite.permission === 'edit' ? '可以编辑' : '仅查看'}</small>
+        </div>
+        <div class="invitation-actions">
+          <button class="secondary-btn reject-invite-btn" type="button">拒绝</button>
+          <button class="primary-btn accept-invite-btn" type="button">接受</button>
+        </div>`;
+      row.querySelector('.accept-invite-btn').addEventListener('click', () => respondToInvitation(invite.id, true));
+      row.querySelector('.reject-invite-btn').addEventListener('click', () => respondToInvitation(invite.id, false));
+      els.invitationList.appendChild(row);
+    });
+  }
+
+  async function respondToInvitation(shareId, accept) {
+    const { error } = await supabaseClient.rpc('respond_to_return_batch_share', {
+      p_share_id: shareId,
+      p_accept: accept
+    });
+    if (error) {
+      showToast(error.message);
+      return;
+    }
+    showToast(accept ? '已接受共享邀请' : '已拒绝共享邀请');
+    await loadPendingInvitations();
+    renderInvitationList();
+    await loadCloudBatches({ silent: true });
+  }
+
+  function translateShareError(message) {
+    const text = String(message || '');
+    if (/recipient_not_found/i.test(text)) return '没有找到这个邮箱对应的账户，请让对方先注册。';
+    if (/cannot_share_with_self/i.test(text)) return '不能把退货单共享给自己。';
+    if (/not_owner/i.test(text)) return '只有退货单创建者可以共享。';
+    return text;
   }
 
   async function maybeImportLocalData() {

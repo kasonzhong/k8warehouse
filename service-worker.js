@@ -1,9 +1,9 @@
-const CACHE_NAME = 'k8-cloud-accounts-v8-1';
+const CACHE_NAME = 'k8-sharing-v9';
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
-  './app.js?v=8.1.0',
+  './app.js?v=9.0.0',
   './jszip.min.js',
   './manifest.json',
   './icons/icon-192.png',
