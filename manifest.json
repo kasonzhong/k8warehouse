@@ -1,0 +1,23 @@
+{
+  "name": "K8 退货处理系统 V7",
+  "short_name": "K8退货",
+  "description": "兼容电脑和手机，修复手机相机照片保存与预览",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f3f5f8",
+  "theme_color": "#111827",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "orientation": "any"
+}

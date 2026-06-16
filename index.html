@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
+  <meta name="description" content="K8 海外仓退货处理系统，兼容电脑和手机，支持单件与批量退货单" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="stylesheet" href="styles.css" />
+  <title>K8 退货处理系统 V7</title>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">K8 OVERSEAS WAREHOUSE</p>
+      <h1>退货处理工作台</h1>
+      <p class="subtitle">同一网页兼容电脑和手机，支持单件退货单、批量处理、拍照、SKU 和统一复核。</p>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="stats" aria-label="批次统计">
+      <article><span id="statPending">0</span><small>待处理退货单</small></article>
+      <article><span id="statActive">0</span><small>处理中</small></article>
+      <article><span id="statReview">0</span><small>待统一复核</small></article>
+      <article><span id="statDone">0</span><small>已完成</small></article>
+    </section>
+
+    <section class="toolbar">
+      <div class="search-wrap">
+        <input id="searchInput" type="search" placeholder="搜索客户、日期、面单号或 SKU" autocomplete="off" />
+      </div>
+      <select id="statusFilter" aria-label="按状态筛选">
+        <option value="all">全部状态</option>
+        <option value="pending">待处理</option>
+        <option value="active">处理中</option>
+        <option value="review">待复核</option>
+        <option value="done">已完成</option>
+      </select>
+      <button id="exportBtn" class="secondary-btn">导出 CSV</button>
+      <button id="newSingleBtn" class="secondary-btn">＋ 新建退货单</button>
+      <button id="newBatchBtn" class="primary-btn">＋ 批量新建退货单</button>
+    </section>
+
+    <section id="batchList" class="batch-list"></section>
+
+    <section id="emptyState" class="empty-state hidden">
+      <div class="empty-icon">📁</div>
+      <h2>还没有退货单</h2>
+      <p>可以新建一件退货单，也可以按客户建立持续添加商品的批量退货单。</p>
+      <button id="emptyNewBtn" class="primary-btn">新建第一张退货单</button>
+    </section>
+  </main>
+
+  <button id="floatingAddBtn" class="floating-add" aria-label="新建退货单">＋</button>
+
+
+
+  <dialog id="mobileCreateDialog" class="mobile-create-dialog">
+    <div class="mobile-create-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">CREATE RETURN ORDER</p>
+          <h2>选择新建方式</h2>
+        </div>
+        <button type="button" class="icon-btn" data-close="mobileCreateDialog" aria-label="关闭">×</button>
+      </div>
+      <div class="mobile-create-options">
+        <button id="mobileNewSingleBtn" class="mobile-create-option" type="button">
+          <span class="mobile-create-icon">1</span>
+          <span><strong>新建退货单</strong><small>只处理一件退货</small></span>
+        </button>
+        <button id="mobileNewBatchBtn" class="mobile-create-option" type="button">
+          <span class="mobile-create-icon">∞</span>
+          <span><strong>批量新建退货单</strong><small>同一客户连续处理多件</small></span>
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="newSingleDialog">
+    <form id="newSingleForm" method="dialog" class="dialog-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">NEW RETURN ORDER</p>
+          <h2>新建退货单</h2>
+        </div>
+        <button type="button" class="icon-btn" data-close="newSingleDialog" aria-label="关闭">×</button>
+      </div>
+
+      <div class="form-grid">
+        <label class="field">
+          客户名称
+          <input name="client" required placeholder="例如：客户A" autocomplete="off" />
+        </label>
+
+        <label class="field">
+          处理日期
+          <input id="singleDateInput" name="orderDate" type="date" required />
+        </label>
+
+        <label class="field">
+          面单号（可选）
+          <input name="tracking" placeholder="可以进入处理页面后再扫描" autocomplete="off" />
+        </label>
+
+        <label class="field">
+          SKU（可选）
+          <input name="sku" placeholder="可以进入处理页面后再录入" autocomplete="off" />
+        </label>
+
+        <label class="field checkbox-field">
+          <input name="inspectionRequired" type="checkbox" />
+          <span>
+            <strong>需要分拣质检</strong>
+            <small>勾选后需要记录商品状态和处理建议。</small>
+          </span>
+        </label>
+      </div>
+
+      <label class="field">
+        退货单备注
+        <textarea name="notes" rows="3" placeholder="例如：只需拍面单、商品正面和瑕疵"></textarea>
+      </label>
+
+      <div class="dialog-actions">
+        <button type="button" class="secondary-btn" data-close="newSingleDialog">取消</button>
+        <button type="submit" class="primary-btn">创建并开始处理</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="newBatchDialog">
+    <form id="newBatchForm" method="dialog" class="dialog-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">NEW BATCH RETURN ORDER</p>
+          <h2>批量新建退货单</h2>
+        </div>
+        <button type="button" class="icon-btn" data-close="newBatchDialog" aria-label="关闭">×</button>
+      </div>
+
+      <div class="form-grid">
+        <label class="field">
+          客户名称
+          <input name="client" required placeholder="例如：客户A" autocomplete="off" />
+        </label>
+
+        <label class="field">
+          处理日期
+          <input id="batchDateInput" name="batchDate" type="date" required />
+        </label>
+        <label class="field checkbox-field">
+          <input name="inspectionRequired" type="checkbox" />
+          <span>
+            <strong>需要分拣质检</strong>
+            <small>勾选后，每件商品需要记录商品状态和处理建议。</small>
+          </span>
+        </label>
+      </div>
+
+      <label class="field">
+        可选：批量预填面单号和 SKU
+        <textarea name="prefill" rows="6" placeholder="每行一件，格式：面单号,SKU&#10;例如：&#10;EVRI123456,SKU-A01&#10;RM987654,SKU-A02"></textarea>
+        <small class="field-help">支持英文逗号、Tab 或竖线分隔。不填写也可以，系统会先生成第 1 件，处理时再继续添加下一件。</small>
+      </label>
+
+      <label class="field">
+        退货单备注
+        <textarea name="notes" rows="3" placeholder="例如：本批次只需拍面单、商品正面和瑕疵"></textarea>
+      </label>
+
+      <div class="dialog-actions">
+        <button type="button" class="secondary-btn" data-close="newBatchDialog">取消</button>
+        <button type="submit" class="primary-btn">创建批量退货单</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="batchDialog" class="batch-dialog">
+    <div class="batch-shell">
+      <header class="batch-header">
+        <button id="closeBatchBtn" class="icon-btn" type="button" aria-label="返回列表">←</button>
+        <div class="batch-heading">
+          <p id="batchEyebrow" class="eyebrow"></p>
+          <h2 id="batchTitle"></h2>
+          <p id="batchMeta" class="muted"></p>
+        </div>
+        <div class="batch-header-actions">
+          <button id="reviewBatchBtn" class="secondary-btn" type="button">统一复核</button>
+          <button id="deleteBatchBtn" class="danger-ghost" type="button">删除退货单</button>
+        </div>
+      </header>
+
+      <div class="batch-progress-wrap">
+        <div class="batch-progress"><span id="batchProgressBar"></span></div>
+        <p id="batchProgressText"></p>
+      </div>
+
+      <div class="batch-layout">
+        <aside class="item-sidebar">
+          <div class="sidebar-head">
+            <strong>退货任务</strong>
+            <button id="addItemsBtn" class="small-btn" type="button">＋添加一件</button>
+          </div>
+          <div id="itemList" class="item-list"></div>
+        </aside>
+
+        <main id="batchMain" class="batch-main"></main>
+      </div>
+    </div>
+  </dialog>
+
+
+  <dialog id="photoPreviewDialog" class="photo-preview-dialog">
+    <div class="photo-preview-shell">
+      <button id="closePhotoPreviewBtn" class="photo-preview-close" type="button" aria-label="关闭预览">×</button>
+      <img id="photoPreviewImage" alt="退货照片大图预览" />
+    </div>
+  </dialog>
+
+  <dialog id="labelDialog">
+    <div class="dialog-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">SKU LABEL</p>
+          <h2>打印 SKU 标签</h2>
+        </div>
+        <button type="button" class="icon-btn" data-close="labelDialog">×</button>
+      </div>
+      <div id="printableLabel" class="sku-label">
+        <p>K8 OVERSEAS WAREHOUSE</p>
+        <strong id="labelSku">SKU</strong>
+        <span id="labelItemId"></span>
+        <span id="labelTracking"></span>
+        <small id="labelDate"></small>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" class="secondary-btn" data-close="labelDialog">关闭</button>
+        <button id="printLabelBtn" type="button" class="primary-btn">打印标签</button>
+      </div>
+    </div>
+  </dialog>
+
+  <template id="batchCardTemplate">
+    <article class="batch-card">
+      <div class="folder-icon" aria-hidden="true">🧾</div>
+      <div class="batch-card-main">
+        <div class="batch-topline">
+          <span class="status-pill"></span>
+          <span class="batch-id"></span>
+        </div>
+        <h3 class="batch-name"></h3>
+        <p class="batch-note"></p>
+        <div class="batch-details">
+          <span class="batch-count"></span>
+          <span class="batch-inspection"></span>
+          <span class="batch-time"></span>
+        </div>
+      </div>
+      <div class="batch-card-side">
+        <div class="mini-progress"><span></span></div>
+        <small class="batch-step-label"></small>
+        <button class="open-batch-btn primary-btn">开始处理</button>
+        <button class="export-batch-btn secondary-btn">导出 Excel 表格</button>
+      </div>
+    </article>
+  </template>
+
+  <script src="jszip.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
