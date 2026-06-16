@@ -4,19 +4,136 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
-  <meta name="description" content="K8 海外仓退货处理系统，兼容电脑和手机，支持单件与批量退货单" />
+  <meta name="description" content="K8 云端退货处理系统，支持独立账号、电脑手机同步与私有照片存储" />
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="styles.css" />
-  <title>K8 退货处理系统 V7</title>
+  <title>K8 退货处理系统 V8 云端账户版</title>
 </head>
 <body>
+
+  <section id="setupScreen" class="auth-screen hidden">
+    <div class="auth-card setup-card">
+      <div class="auth-brand">
+        <img src="icons/icon-192.png" alt="K8" />
+        <div>
+          <p class="eyebrow">K8 CLOUD SETUP</p>
+          <h1>需要连接 Supabase</h1>
+        </div>
+      </div>
+      <p>网站代码已经包含账户和云端同步功能，但还需要填写你自己的 Supabase 项目地址和 Publishable Key。</p>
+      <div class="setup-steps">
+        <strong>配置方法</strong>
+        <ol>
+          <li>在 Supabase 创建项目。</li>
+          <li>运行项目内的 <code>supabase-setup.sql</code>。</li>
+          <li>打开 <code>supabase-config.js</code>，填入 Project URL 和 Publishable Key。</li>
+          <li>提交到 GitHub，等待 Vercel 自动重新部署。</li>
+        </ol>
+      </div>
+      <p class="auth-note">请勿填写或公开 Service Role Key。浏览器只应使用 Publishable Key 或旧版 anon key。</p>
+    </div>
+  </section>
+
+  <section id="authScreen" class="auth-screen hidden">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <img src="icons/icon-192.png" alt="K8" />
+        <div>
+          <p class="eyebrow">K8 RETURNS CLOUD</p>
+          <h1>退货处理系统</h1>
+          <p>登录后在电脑和手机管理同一份退货数据。</p>
+        </div>
+      </div>
+
+      <div class="auth-tabs" role="tablist">
+        <button id="loginTabBtn" class="auth-tab active" type="button">登录</button>
+        <button id="registerTabBtn" class="auth-tab" type="button">注册账户</button>
+      </div>
+
+      <form id="loginForm" class="auth-form">
+        <label>
+          邮箱
+          <input name="email" type="email" autocomplete="email" required placeholder="name@example.com" />
+        </label>
+        <label>
+          密码
+          <input name="password" type="password" autocomplete="current-password" required minlength="6" placeholder="请输入密码" />
+        </label>
+        <button id="loginSubmitBtn" class="primary-btn auth-submit" type="submit">登录</button>
+        <button id="forgotPasswordBtn" class="auth-link" type="button">忘记密码？</button>
+      </form>
+
+      <form id="registerForm" class="auth-form hidden">
+        <label>
+          显示名称
+          <input name="displayName" autocomplete="name" required placeholder="例如：Kason" />
+        </label>
+        <label>
+          邮箱
+          <input name="email" type="email" autocomplete="email" required placeholder="name@example.com" />
+        </label>
+        <label>
+          密码
+          <input name="password" type="password" autocomplete="new-password" required minlength="6" placeholder="至少6位" />
+        </label>
+        <label>
+          确认密码
+          <input name="confirmPassword" type="password" autocomplete="new-password" required minlength="6" placeholder="再次输入密码" />
+        </label>
+        <button id="registerSubmitBtn" class="primary-btn auth-submit" type="submit">创建账户</button>
+      </form>
+
+      <p id="authMessage" class="auth-message" aria-live="polite"></p>
+      <p class="auth-note">不同账户的数据由数据库权限隔离，其他用户无法读取你的退货单和照片。</p>
+    </div>
+  </section>
+
+  <dialog id="passwordDialog" class="password-dialog">
+    <form id="passwordForm" method="dialog" class="dialog-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">RESET PASSWORD</p>
+          <h2>设置新密码</h2>
+        </div>
+      </div>
+      <label class="field">
+        新密码
+        <input name="password" type="password" minlength="6" required autocomplete="new-password" />
+      </label>
+      <label class="field">
+        再次输入
+        <input name="confirmPassword" type="password" minlength="6" required autocomplete="new-password" />
+      </label>
+      <p id="passwordMessage" class="auth-message"></p>
+      <div class="dialog-actions">
+        <button type="submit" class="primary-btn">保存新密码</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="appShell" class="app-shell hidden">
   <header class="topbar">
     <div>
-      <p class="eyebrow">K8 OVERSEAS WAREHOUSE</p>
+      <p class="eyebrow">K8 RETURNS CLOUD</p>
       <h1>退货处理工作台</h1>
-      <p class="subtitle">同一网页兼容电脑和手机，支持单件退货单、批量处理、拍照、SKU 和统一复核。</p>
+      <p class="subtitle">账户数据云端隔离；电脑和手机登录同一账户后自动同步。</p>
+    </div>
+    <div class="account-panel">
+      <div class="sync-indicator">
+        <span id="syncDot" class="sync-dot"></span>
+        <span id="cloudStatus">正在连接云端…</span>
+      </div>
+      <div class="account-identity">
+        <span id="userAvatar" class="user-avatar">K</span>
+        <span>
+          <strong id="userDisplayName">用户</strong>
+          <small id="userEmail"></small>
+        </span>
+      </div>
+      <button id="refreshCloudBtn" class="secondary-btn account-button" type="button">同步</button>
+      <button id="logoutBtn" class="secondary-btn account-button" type="button">退出</button>
     </div>
   </header>
 
@@ -269,7 +386,11 @@
     </article>
   </template>
 
+  </div>
+
   <script src="jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="supabase-config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'k8-return-mobile-camera-fix-v7';
+const CACHE_NAME = 'k8-cloud-accounts-v8';
 const ASSETS = [
   './',
   './index.html',

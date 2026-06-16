@@ -1,7 +1,7 @@
 {
-  "name": "K8 退货处理系统 V7",
-  "short_name": "K8退货",
-  "description": "兼容电脑和手机，修复手机相机照片保存与预览",
+  "name": "K8 退货处理系统 V8 云端账户版",
+  "short_name": "K8云端退货",
+  "description": "独立账户、云端数据、私有照片和电脑手机同步",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#f3f5f8",

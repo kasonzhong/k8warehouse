@@ -8,6 +8,10 @@
   const DB_VERSION = 1;
   const PHOTO_STORE = 'photos';
   const MIN_PHOTOS = 2;
+  const CLOUD_TABLE = 'return_batches';
+  const DEFAULT_PHOTO_BUCKET = 'return-photos';
+  const CLOUD_CACHE_PREFIX = 'k8-cloud-cache-v8-';
+  const LOCAL_IMPORT_MARK_PREFIX = 'k8-local-import-v8-';
 
   const els = {};
   let batches = [];
@@ -20,20 +24,37 @@
   let wakeLock = null;
   let nativeCameraPending = false;
   let nativeCameraRestartTimer = null;
+  let supabaseClient = null;
+  let currentUser = null;
+  let realtimeChannel = null;
+  let cloudSyncTimer = null;
+  let cloudSyncRunning = false;
+  let cloudKnownIds = new Set();
+  let appStartedForUserId = null;
 
-  document.addEventListener('DOMContentLoaded', init);
+  document.addEventListener('DOMContentLoaded', () => {
+    init().catch(error => {
+      console.error(error);
+      showSetupError(error.message || '系统初始化失败');
+    });
+  });
 
-  function init() {
+  async function init() {
     cacheElements();
     bindEvents();
     setDefaultDate();
-    loadBatches();
-    renderBatches();
     registerServiceWorker();
+    await initialiseCloud();
   }
 
   function cacheElements() {
     [
+      'setupScreen', 'authScreen', 'appShell',
+      'loginTabBtn', 'registerTabBtn', 'loginForm', 'registerForm',
+      'loginSubmitBtn', 'registerSubmitBtn', 'forgotPasswordBtn', 'authMessage',
+      'passwordDialog', 'passwordForm', 'passwordMessage',
+      'logoutBtn', 'refreshCloudBtn', 'cloudStatus', 'syncDot',
+      'userDisplayName', 'userEmail', 'userAvatar',
       'statPending', 'statActive', 'statReview', 'statDone',
       'searchInput', 'statusFilter', 'exportBtn', 'newSingleBtn', 'newBatchBtn',
       'emptyNewBtn', 'floatingAddBtn', 'batchList', 'emptyState',
@@ -51,6 +72,18 @@
   }
 
   function bindEvents() {
+    els.loginTabBtn.addEventListener('click', () => setAuthMode('login'));
+    els.registerTabBtn.addEventListener('click', () => setAuthMode('register'));
+    els.loginForm.addEventListener('submit', signInUser);
+    els.registerForm.addEventListener('submit', registerUser);
+    els.forgotPasswordBtn.addEventListener('click', sendPasswordReset);
+    els.passwordForm.addEventListener('submit', updateRecoveredPassword);
+    els.logoutBtn.addEventListener('click', signOutUser);
+    els.refreshCloudBtn.addEventListener('click', async () => {
+      await flushCloudSync();
+      await loadCloudBatches({ preserveOpenBatch: true });
+    });
+
     els.newSingleBtn.addEventListener('click', openNewSingleDialog);
     els.newBatchBtn.addEventListener('click', openNewBatchDialog);
     els.emptyNewBtn.addEventListener('click', openNewSingleDialog);
@@ -107,7 +140,14 @@
       }
     });
 
-    window.addEventListener('beforeunload', saveBatches);
+    window.addEventListener('beforeunload', () => saveLocalCloudCache());
+    window.addEventListener('online', () => {
+      setCloudStatus('syncing', '网络恢复，正在同步…');
+      flushCloudSync();
+    });
+    window.addEventListener('offline', () => {
+      setCloudStatus('offline', '离线：修改将在联网后同步');
+    });
   }
 
   function openNewSingleDialog() {
@@ -234,7 +274,18 @@
   }
 
   function saveBatches() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(batches));
+    saveLocalCloudCache();
+    if (!currentUser || !supabaseClient) return;
+
+    setCloudStatus(
+      navigator.onLine ? 'syncing' : 'offline',
+      navigator.onLine ? '有修改，正在同步…' : '离线：修改将在联网后同步'
+    );
+
+    clearTimeout(cloudSyncTimer);
+    cloudSyncTimer = setTimeout(() => {
+      flushCloudSync();
+    }, 650);
   }
 
 
@@ -581,7 +632,8 @@
 
     if (deletingLast) {
       batches = batches.filter(candidate => candidate.id !== batch.id);
-      saveBatches();
+      saveLocalCloudCache();
+      await deleteBatchFromCloud(batch.id);
       stopCamera();
       if (els.batchDialog.open) els.batchDialog.close();
       activeBatchId = null;
@@ -1540,7 +1592,8 @@
     }
 
     batches = batches.filter(candidate => candidate.id !== batch.id);
-    saveBatches();
+    saveLocalCloudCache();
+    await deleteBatchFromCloud(batch.id);
     closeBatch();
     showToast('退货单已删除');
   }
@@ -2169,6 +2222,60 @@
   }
 
   async function putPhoto(id, blob) {
+    if (!currentUser || !supabaseClient) {
+      throw new Error('请先登录账户');
+    }
+    if (!navigator.onLine) {
+      throw new Error('当前离线，照片必须联网后才能上传到云端');
+    }
+
+    const bucket = getPhotoBucket();
+    const { error } = await supabaseClient.storage
+      .from(bucket)
+      .upload(id, blob, {
+        contentType: blob.type || 'image/jpeg',
+        cacheControl: '3600',
+        upsert: false
+      });
+
+    if (error) throw new Error(`云端照片上传失败：${error.message}`);
+
+    await putLocalPhoto(id, blob).catch(() => {});
+  }
+
+  async function getPhoto(id) {
+    const cached = await getLocalPhoto(id).catch(() => null);
+    if (cached) return cached;
+
+    // Legacy photo IDs remain readable from the old browser database.
+    if (!isCloudPhotoPath(id) || !supabaseClient || !currentUser) {
+      return cached;
+    }
+
+    const { data, error } = await supabaseClient.storage
+      .from(getPhotoBucket())
+      .download(id);
+
+    if (error) {
+      console.warn('Cloud photo download failed:', error);
+      return null;
+    }
+
+    await putLocalPhoto(id, data).catch(() => {});
+    return data;
+  }
+
+  async function deletePhoto(id) {
+    if (isCloudPhotoPath(id) && supabaseClient && currentUser) {
+      const { error } = await supabaseClient.storage
+        .from(getPhotoBucket())
+        .remove([id]);
+      if (error) console.warn('Cloud photo delete failed:', error);
+    }
+    await deleteLocalPhoto(id).catch(() => {});
+  }
+
+  async function putLocalPhoto(id, blob) {
     const db = await openDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(PHOTO_STORE, 'readwrite');
@@ -2178,17 +2285,17 @@
     });
   }
 
-  async function getPhoto(id) {
+  async function getLocalPhoto(id) {
     const db = await openDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(PHOTO_STORE, 'readonly');
       const request = tx.objectStore(PHOTO_STORE).get(id);
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => resolve(request.result || null);
       request.onerror = () => reject(request.error);
     });
   }
 
-  async function deletePhoto(id) {
+  async function deleteLocalPhoto(id) {
     const db = await openDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(PHOTO_STORE, 'readwrite');
@@ -2207,7 +2314,20 @@
   }
 
   function makePhotoId(itemId) {
-    return `${itemId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    if (!currentUser) {
+      return `${itemId}-${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`;
+    }
+    const batchId = activeBatchId || 'unassigned';
+    const filename = `${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`;
+    return `${currentUser.id}/${batchId}/${itemId}/${filename}`;
+  }
+
+  function isCloudPhotoPath(id) {
+    return !!currentUser && String(id || '').startsWith(`${currentUser.id}/`);
+  }
+
+  function getPhotoBucket() {
+    return window.K8_SUPABASE_CONFIG?.photoBucket || DEFAULT_PHOTO_BUCKET;
   }
 
   function toDateInput(date) {
@@ -2261,6 +2381,560 @@
   }
 
 
+
+  async function initialiseCloud() {
+    const config = window.K8_SUPABASE_CONFIG || {};
+    const configured =
+      typeof config.url === 'string' &&
+      /^https:\/\/.+\.supabase\.co\/?$/.test(config.url.trim()) &&
+      typeof config.publishableKey === 'string' &&
+      config.publishableKey.trim() &&
+      !config.publishableKey.includes('YOUR_');
+
+    if (!configured || !window.supabase?.createClient) {
+      showSetupScreen();
+      return;
+    }
+
+    supabaseClient = window.supabase.createClient(
+      config.url.trim().replace(/\/$/, ''),
+      config.publishableKey.trim(),
+      {
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true
+        }
+      }
+    );
+
+    supabaseClient.auth.onAuthStateChange((event, session) => {
+      setTimeout(() => handleAuthEvent(event, session), 0);
+    });
+
+    const { data, error } = await supabaseClient.auth.getSession();
+    if (error) {
+      showAuthScreen();
+      setAuthMessage(error.message, 'error');
+      return;
+    }
+
+    if (data.session?.user) {
+      await startUserSession(data.session.user);
+    } else {
+      showAuthScreen();
+    }
+  }
+
+  async function handleAuthEvent(event, session) {
+    if (event === 'PASSWORD_RECOVERY') {
+      els.passwordDialog.showModal();
+      return;
+    }
+
+    if (event === 'SIGNED_OUT' || !session?.user) {
+      stopUserSession();
+      showAuthScreen();
+      return;
+    }
+
+    if (['SIGNED_IN', 'TOKEN_REFRESHED', 'USER_UPDATED', 'INITIAL_SESSION'].includes(event)) {
+      await startUserSession(session.user);
+    }
+  }
+
+  async function startUserSession(user) {
+    if (!user) return;
+    currentUser = user;
+    updateAccountUI(user);
+    showAppShell();
+
+    if (appStartedForUserId !== user.id) {
+      appStartedForUserId = user.id;
+      await loadCloudBatches();
+      await maybeImportLocalData();
+      subscribeToCloudChanges();
+    }
+
+    setCloudStatus(
+      navigator.onLine ? 'online' : 'offline',
+      navigator.onLine ? '云端已连接' : '离线：显示本机缓存'
+    );
+  }
+
+  function stopUserSession() {
+    stopCamera();
+    unsubscribeFromCloudChanges();
+    currentUser = null;
+    appStartedForUserId = null;
+    batches = [];
+    cloudKnownIds = new Set();
+    if (els.batchDialog.open) els.batchDialog.close();
+    renderBatches();
+  }
+
+  function showSetupScreen() {
+    els.setupScreen.classList.remove('hidden');
+    els.authScreen.classList.add('hidden');
+    els.appShell.classList.add('hidden');
+  }
+
+  function showSetupError(message) {
+    showSetupScreen();
+    const paragraph = els.setupScreen.querySelector('.auth-note');
+    if (paragraph) paragraph.textContent = message;
+  }
+
+  function showAuthScreen() {
+    els.setupScreen.classList.add('hidden');
+    els.authScreen.classList.remove('hidden');
+    els.appShell.classList.add('hidden');
+    setAuthMode('login');
+  }
+
+  function showAppShell() {
+    els.setupScreen.classList.add('hidden');
+    els.authScreen.classList.add('hidden');
+    els.appShell.classList.remove('hidden');
+  }
+
+  function setAuthMode(mode) {
+    const register = mode === 'register';
+    els.loginTabBtn.classList.toggle('active', !register);
+    els.registerTabBtn.classList.toggle('active', register);
+    els.loginForm.classList.toggle('hidden', register);
+    els.registerForm.classList.toggle('hidden', !register);
+    setAuthMessage('');
+  }
+
+  function setAuthMessage(message, type = '') {
+    els.authMessage.textContent = message || '';
+    els.authMessage.className = `auth-message ${type}`.trim();
+  }
+
+  async function signInUser(event) {
+    event.preventDefault();
+    const form = new FormData(els.loginForm);
+    const email = String(form.get('email') || '').trim();
+    const password = String(form.get('password') || '');
+
+    setAuthButtonBusy(els.loginSubmitBtn, true, '正在登录…');
+    setAuthMessage('');
+
+    const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    setAuthButtonBusy(els.loginSubmitBtn, false, '登录');
+
+    if (error) {
+      setAuthMessage(translateAuthError(error.message), 'error');
+    }
+  }
+
+  async function registerUser(event) {
+    event.preventDefault();
+    const form = new FormData(els.registerForm);
+    const displayName = String(form.get('displayName') || '').trim();
+    const email = String(form.get('email') || '').trim();
+    const password = String(form.get('password') || '');
+    const confirmPassword = String(form.get('confirmPassword') || '');
+
+    if (password !== confirmPassword) {
+      setAuthMessage('两次输入的密码不一致。', 'error');
+      return;
+    }
+
+    setAuthButtonBusy(els.registerSubmitBtn, true, '正在创建账户…');
+    setAuthMessage('');
+
+    const { data, error } = await supabaseClient.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { display_name: displayName },
+        emailRedirectTo: location.origin
+      }
+    });
+
+    setAuthButtonBusy(els.registerSubmitBtn, false, '创建账户');
+
+    if (error) {
+      setAuthMessage(translateAuthError(error.message), 'error');
+      return;
+    }
+
+    if (data.session) {
+      setAuthMessage('账户创建成功，正在进入系统…', 'success');
+    } else {
+      setAuthMessage('账户已创建。请打开邮箱中的确认邮件，然后返回登录。', 'success');
+      setAuthMode('login');
+      els.loginForm.elements.email.value = email;
+    }
+  }
+
+  async function sendPasswordReset() {
+    const email = String(els.loginForm.elements.email.value || '').trim();
+    if (!email) {
+      setAuthMessage('请先填写需要找回密码的邮箱。', 'error');
+      els.loginForm.elements.email.focus();
+      return;
+    }
+
+    const { error } = await supabaseClient.auth.resetPasswordForEmail(email, {
+      redirectTo: location.origin
+    });
+
+    if (error) {
+      setAuthMessage(translateAuthError(error.message), 'error');
+    } else {
+      setAuthMessage('重置密码邮件已发送，请检查邮箱。', 'success');
+    }
+  }
+
+  async function updateRecoveredPassword(event) {
+    event.preventDefault();
+    const form = new FormData(els.passwordForm);
+    const password = String(form.get('password') || '');
+    const confirmPassword = String(form.get('confirmPassword') || '');
+
+    if (password !== confirmPassword) {
+      els.passwordMessage.textContent = '两次密码不一致。';
+      els.passwordMessage.className = 'auth-message error';
+      return;
+    }
+
+    const { error } = await supabaseClient.auth.updateUser({ password });
+    if (error) {
+      els.passwordMessage.textContent = translateAuthError(error.message);
+      els.passwordMessage.className = 'auth-message error';
+      return;
+    }
+
+    els.passwordMessage.textContent = '密码已更新。';
+    els.passwordMessage.className = 'auth-message success';
+    setTimeout(() => els.passwordDialog.close(), 700);
+  }
+
+  async function signOutUser() {
+    await flushCloudSync();
+    await supabaseClient.auth.signOut();
+  }
+
+  function setAuthButtonBusy(button, busy, text) {
+    button.disabled = busy;
+    button.textContent = text;
+  }
+
+  function translateAuthError(message) {
+    const text = String(message || '');
+    if (/invalid login credentials/i.test(text)) return '邮箱或密码不正确。';
+    if (/email not confirmed/i.test(text)) return '请先打开邮箱中的确认邮件。';
+    if (/user already registered/i.test(text)) return '这个邮箱已经注册，请直接登录。';
+    if (/password should be/i.test(text)) return '密码长度不足，请至少输入6位。';
+    if (/rate limit/i.test(text)) return '请求次数过多，请稍后再试。';
+    return text || '账户操作失败，请重试。';
+  }
+
+  function updateAccountUI(user) {
+    const displayName =
+      user.user_metadata?.display_name ||
+      user.email?.split('@')[0] ||
+      '用户';
+    els.userDisplayName.textContent = displayName;
+    els.userEmail.textContent = user.email || '';
+    els.userAvatar.textContent = displayName.slice(0, 1).toUpperCase();
+  }
+
+  function setCloudStatus(state, message) {
+    if (!els.cloudStatus || !els.syncDot) return;
+    els.cloudStatus.textContent = message;
+    els.syncDot.className = `sync-dot ${state || ''}`.trim();
+  }
+
+  function userCacheKey() {
+    return currentUser ? `${CLOUD_CACHE_PREFIX}${currentUser.id}` : null;
+  }
+
+  function saveLocalCloudCache() {
+    const key = userCacheKey();
+    if (!key) return;
+    try {
+      localStorage.setItem(key, JSON.stringify(batches));
+    } catch (error) {
+      console.warn('Local cloud cache write failed:', error);
+    }
+  }
+
+  function readLocalCloudCache() {
+    const key = userCacheKey();
+    if (!key) return [];
+    try {
+      const value = JSON.parse(localStorage.getItem(key) || '[]');
+      return Array.isArray(value) ? value : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function loadCloudBatches(options = {}) {
+    if (!currentUser || !supabaseClient) return;
+
+    const openBatchId = options.preserveOpenBatch ? activeBatchId : null;
+    els.batchList.innerHTML =
+      '<div class="cloud-loading"><strong>正在读取云端退货数据</strong><span>请稍候…</span></div>';
+    els.emptyState.classList.add('hidden');
+    setCloudStatus('syncing', '正在读取云端数据…');
+
+    if (!navigator.onLine) {
+      batches = readLocalCloudCache();
+      normaliseBatches();
+      renderBatches();
+      setCloudStatus('offline', '离线：显示本机缓存');
+      return;
+    }
+
+    const { data, error } = await supabaseClient
+      .from(CLOUD_TABLE)
+      .select('id,payload,updated_at')
+      .order('updated_at', { ascending: false });
+
+    if (error) {
+      console.error(error);
+      const cache = readLocalCloudCache();
+      if (cache.length) {
+        batches = cache;
+        normaliseBatches();
+        renderBatches();
+        setCloudStatus('error', '云端读取失败，显示本机缓存');
+        return;
+      }
+      batches = [];
+      renderBatches();
+      setCloudStatus('error', `云端读取失败：${error.message}`);
+      return;
+    }
+
+    batches = (data || [])
+      .map(row => row.payload)
+      .filter(Boolean);
+    normaliseBatches();
+    cloudKnownIds = new Set(batches.map(batch => batch.id));
+    saveLocalCloudCache();
+    renderBatches();
+    setCloudStatus('online', '云端已同步');
+
+    if (openBatchId && batches.some(batch => batch.id === openBatchId)) {
+      activeBatchId = openBatchId;
+      renderBatch();
+    }
+  }
+
+  async function flushCloudSync() {
+    clearTimeout(cloudSyncTimer);
+    if (cloudSyncRunning || !currentUser || !supabaseClient) return;
+    if (!navigator.onLine) {
+      setCloudStatus('offline', '离线：修改将在联网后同步');
+      return;
+    }
+
+    cloudSyncRunning = true;
+    setCloudStatus('syncing', '正在同步云端…');
+
+    try {
+      if (batches.length) {
+        const rows = batches.map(batch => ({
+          user_id: currentUser.id,
+          id: batch.id,
+          payload: batch,
+          created_at: batch.createdAt || new Date().toISOString(),
+          updated_at: batch.updatedAt || new Date().toISOString()
+        }));
+
+        const { error } = await supabaseClient
+          .from(CLOUD_TABLE)
+          .upsert(rows, { onConflict: 'user_id,id' });
+
+        if (error) throw error;
+        cloudKnownIds = new Set(batches.map(batch => batch.id));
+      }
+
+      saveLocalCloudCache();
+      setCloudStatus('online', '所有修改已同步');
+    } catch (error) {
+      console.error('Cloud sync failed:', error);
+      setCloudStatus('error', `同步失败：${error.message}`);
+    } finally {
+      cloudSyncRunning = false;
+    }
+  }
+
+  async function deleteBatchFromCloud(batchId) {
+    if (!currentUser || !supabaseClient || !navigator.onLine) {
+      cloudKnownIds.delete(batchId);
+      setCloudStatus('offline', '离线删除尚未同步');
+      return;
+    }
+
+    const { error } = await supabaseClient
+      .from(CLOUD_TABLE)
+      .delete()
+      .eq('id', batchId);
+
+    if (error) {
+      setCloudStatus('error', `云端删除失败：${error.message}`);
+      throw error;
+    }
+
+    cloudKnownIds.delete(batchId);
+    setCloudStatus('online', '云端已同步');
+  }
+
+  function subscribeToCloudChanges() {
+    unsubscribeFromCloudChanges();
+    if (!currentUser || !supabaseClient) return;
+
+    realtimeChannel = supabaseClient
+      .channel(`return-batches-${currentUser.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: CLOUD_TABLE,
+          filter: `user_id=eq.${currentUser.id}`
+        },
+        handleCloudChange
+      )
+      .subscribe(status => {
+        if (status === 'SUBSCRIBED') {
+          setCloudStatus('online', '云端实时同步已开启');
+        }
+      });
+  }
+
+  function unsubscribeFromCloudChanges() {
+    if (realtimeChannel && supabaseClient) {
+      supabaseClient.removeChannel(realtimeChannel);
+    }
+    realtimeChannel = null;
+  }
+
+  function handleCloudChange(change) {
+    if (!currentUser) return;
+
+    if (change.eventType === 'DELETE') {
+      const id = change.old?.id;
+      if (!id) return;
+      const index = batches.findIndex(batch => batch.id === id);
+      if (index >= 0) batches.splice(index, 1);
+      if (activeBatchId === id && els.batchDialog.open) {
+        els.batchDialog.close();
+        activeBatchId = null;
+        showToast('这张退货单已在另一台设备删除');
+      }
+      saveLocalCloudCache();
+      renderBatches();
+      return;
+    }
+
+    const remote = change.new?.payload;
+    if (!remote?.id) return;
+
+    const index = batches.findIndex(batch => batch.id === remote.id);
+    const local = index >= 0 ? batches[index] : null;
+    const remoteTime = new Date(remote.updatedAt || 0).getTime();
+    const localTime = new Date(local?.updatedAt || 0).getTime();
+
+    if (local && remoteTime <= localTime) return;
+
+    if (index >= 0) batches[index] = remote;
+    else batches.unshift(remote);
+
+    normaliseBatches();
+    saveLocalCloudCache();
+    renderBatches();
+
+    if (activeBatchId === remote.id && els.batchDialog.open) {
+      renderBatch();
+      showToast('已同步另一台设备的更新');
+    }
+  }
+
+  async function maybeImportLocalData() {
+    if (!currentUser || !supabaseClient) return;
+    const marker = `${LOCAL_IMPORT_MARK_PREFIX}${currentUser.id}`;
+    if (localStorage.getItem(marker)) return;
+
+    const localBatches = readLegacyLocalBatches();
+    if (!localBatches.length) {
+      localStorage.setItem(marker, 'none');
+      return;
+    }
+
+    const shouldImport = confirm(
+      `检测到这台设备中有 ${localBatches.length} 张旧版退货单。是否上传到当前账户的云端？`
+    );
+
+    if (!shouldImport) {
+      localStorage.setItem(marker, 'skipped');
+      return;
+    }
+
+    setCloudStatus('syncing', '正在迁移旧版退货数据…');
+    const imported = [];
+
+    for (const batch of localBatches) {
+      const copy = JSON.parse(JSON.stringify(batch));
+      copy.userImportedAt = new Date().toISOString();
+
+      for (const item of copy.items || []) {
+        const uploadedPaths = [];
+        for (const oldPhotoId of item.photos || []) {
+          try {
+            if (isCloudPhotoPath(oldPhotoId)) {
+              uploadedPaths.push(oldPhotoId);
+              continue;
+            }
+            const blob = await getLocalPhoto(oldPhotoId);
+            if (!blob) continue;
+            const path = `${currentUser.id}/${copy.id}/${item.id}/${Date.now()}-${Math.random().toString(16).slice(2)}.jpg`;
+            await putPhoto(path, blob);
+            uploadedPaths.push(path);
+          } catch (error) {
+            console.warn('Legacy photo migration failed:', error);
+          }
+        }
+        item.photos = uploadedPaths;
+      }
+
+      copy.updatedAt = new Date().toISOString();
+      imported.push(copy);
+    }
+
+    const existingIds = new Set(batches.map(batch => batch.id));
+    for (const batch of imported) {
+      if (!existingIds.has(batch.id)) batches.push(batch);
+    }
+
+    normaliseBatches();
+    saveBatches();
+    await flushCloudSync();
+    localStorage.setItem(marker, 'done');
+    renderBatches();
+    showToast(`已把 ${imported.length} 张旧版退货单迁移到云端`);
+  }
+
+  function readLegacyLocalBatches() {
+    const keys = [STORAGE_KEY, LEGACY_BATCH_KEY];
+    for (const key of keys) {
+      try {
+        const value = JSON.parse(localStorage.getItem(key) || '[]');
+        if (Array.isArray(value) && value.length) return value;
+      } catch {
+        // Try next legacy key.
+      }
+    }
+    return [];
+  }
+
   function isMobileLayout() {
     return window.matchMedia('(max-width: 820px)').matches ||
       /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
@@ -2287,7 +2961,12 @@
 
   function registerServiceWorker() {
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && els.batchDialog.open) requestWakeLock();
+      if (document.visibilityState === 'visible') {
+        if (els.batchDialog.open) requestWakeLock();
+        if (currentUser && navigator.onLine) {
+          flushCloudSync();
+        }
+      }
     });
 
     navigator.mediaDevices?.addEventListener?.('devicechange', () => {
