@@ -6,7 +6,7 @@
 // NEVER put the Service Role Key in this file.
 
 window.K8_SUPABASE_CONFIG = {
-  url: 'https://mezbpikmombsqpkolgha.supabase.co/rest/v1/',
+  url: 'https://mezbpikmombsqpkolgha.supabase.co',
   publishableKey: 'sb_publishable_WXyVcdpQ3NZbPqdqopCKYQ_TiRnz7aG',
   photoBucket: 'return-photos'
 };
