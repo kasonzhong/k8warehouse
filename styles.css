@@ -2279,3 +2279,29 @@ dialog::backdrop {
   .share-actions button, .invitation-actions button { flex:1; }
   .batch-card-side { grid-template-columns:1fr 1fr; }
 }
+
+
+/* V10 export improvements */
+.tencent-copy-btn {
+  border-color: #b9d5cb;
+  color: #075e54;
+  background: #f0fdf9;
+}
+
+.tencent-copy-btn:hover {
+  background: #dcfce7;
+}
+
+.batch-card-side {
+  align-content: start;
+}
+
+@media (max-width: 820px) {
+  .batch-card-side {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .batch-card-side .tencent-copy-btn {
+    grid-column: 1 / -1;
+  }
+}
