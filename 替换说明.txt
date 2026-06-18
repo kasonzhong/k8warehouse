@@ -1,12 +1,6 @@
-K8 V10 补丁
+V9跨账户共享补丁
 
-把本文件夹内的文件复制到本地 GitHub 仓库根目录并选择“替换”。
-
-本补丁不包含 supabase-config.js，不会覆盖你的 Supabase URL 和 Publishable Key。
-
-GitHub Desktop:
-Summary: Add in-cell Excel images and Tencent Docs copy
-Commit to main
-Push origin
-
-部署后建议先用无痕窗口测试。
+1. 先在Supabase SQL Editor运行 supabase-setup-v9.sql。
+2. 将其余文件复制到GitHub本地仓库根目录并替换。
+3. 不要覆盖现有的 supabase-config.js。
+4. Commit to main → Push origin → 等待Vercel Ready。
