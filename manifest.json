@@ -1,7 +1,7 @@
 {
-  "name": "K8 退货处理系统 V9 共享权限版",
+  "name": "K8 退货处理系统 V12",
   "short_name": "K8共享退货",
-  "description": "跨账户共享退货单，支持仅查看和可编辑权限",
+  "description": "腾讯文档API入口和手机作为电脑摄像头",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#f3f5f8",

@@ -25,6 +25,10 @@
   let wakeLock = null;
   let nativeCameraPending = false;
   let nativeCameraRestartTimer = null;
+  let remoteCameraChannel = null;
+  let remoteCameraSession = null;
+  let remoteClientChannel = null;
+  let remoteClientStream = null;
   let supabaseClient = null;
   let currentUser = null;
   let realtimeChannel = null;
@@ -59,6 +63,11 @@
       'passwordDialog', 'passwordForm', 'passwordMessage',
       'logoutBtn', 'refreshCloudBtn', 'cloudStatus', 'syncDot',
       'userDisplayName', 'userEmail', 'userAvatar',
+      'remoteCameraDialog', 'remoteCameraLink', 'copyRemoteCameraLinkBtn',
+      'openRemoteCameraLinkBtn', 'remoteCameraStatus', 'remoteCaptureBtn',
+      'remoteCameraClientScreen', 'remoteClientStatus', 'remoteClientVideo',
+      'remoteClientCanvas', 'remoteClientStartBtn', 'remoteClientTestBtn',
+      'remoteClientExitBtn',
       'statPending', 'statActive', 'statReview', 'statDone',
       'searchInput', 'statusFilter', 'exportBtn', 'shareInvitationsBtn', 'invitationCount', 'newSingleBtn', 'newBatchBtn',
       'emptyNewBtn', 'floatingAddBtn', 'batchList', 'emptyState',
@@ -85,6 +94,14 @@
     els.forgotPasswordBtn.addEventListener('click', sendPasswordReset);
     els.passwordForm.addEventListener('submit', updateRecoveredPassword);
     els.logoutBtn.addEventListener('click', signOutUser);
+    els.copyRemoteCameraLinkBtn.addEventListener('click', copyRemoteCameraLink);
+    els.openRemoteCameraLinkBtn.addEventListener('click', () => {
+      if (els.remoteCameraLink.value) window.open(els.remoteCameraLink.value, '_blank');
+    });
+    els.remoteCaptureBtn.addEventListener('click', sendRemoteCaptureCommand);
+    els.remoteClientStartBtn.addEventListener('click', startRemoteClientCamera);
+    els.remoteClientTestBtn.addEventListener('click', () => remoteClientCaptureAndUpload('manual-test'));
+    els.remoteClientExitBtn.addEventListener('click', exitRemoteCameraClient);
     els.refreshCloudBtn.addEventListener('click', async () => {
       await flushCloudSync();
       await loadCloudBatches({ preserveOpenBatch: true });
@@ -479,6 +496,14 @@
         event.stopPropagation();
         exportBatchExcel(batch.id, event.currentTarget);
       });
+      fragment.querySelector('.tencent-copy-btn').addEventListener('click', event => {
+        event.stopPropagation();
+        exportTencentUploadWorkbook(batch.id, event.currentTarget);
+      });
+      fragment.querySelector('.tencent-api-btn').addEventListener('click', event => {
+        event.stopPropagation();
+        syncBatchToTencentApi(batch.id, event.currentTarget);
+      });
       const shareButton = fragment.querySelector('.share-batch-btn');
       const deleteButton = fragment.querySelector('.delete-card-btn');
       if (isBatchOwner(batch)) {
@@ -756,6 +781,7 @@
               <span class="capture-dot"></span>
               实时画面拍照
             </button>
+            <button id="remoteCameraBtn" class="remote-camera-btn" type="button">手机作摄像头</button>
             <div id="mobileRecentPhotos" class="mobile-recent-photos" aria-live="polite"></div>
           </div>
         </section>
@@ -899,6 +925,7 @@
     nativeCameraInput?.addEventListener('change', handleNativeCameraPhoto);
 
     document.getElementById('captureBtn').addEventListener('click', capturePhoto);
+    document.getElementById('remoteCameraBtn')?.addEventListener('click', openRemoteCameraDialog);
     document.getElementById('refreshCameraBtn').addEventListener('click', () => refreshCameraDevices(true));
     document.getElementById('cameraSelect').addEventListener('change', event => startCamera(event.target.value));
 
@@ -1680,7 +1707,7 @@
       const safeClient = sanitiseFilename(batch.client || '客户');
       const safeDate = String(batch.date || toDateInput(new Date())).replaceAll('-', '');
       downloadBlob(workbookBlob, `${safeClient}_${safeDate}_退货处理.xlsx`);
-      showToast('Excel 已导出：清单页含大图，高清照片页可完整预览');
+      showToast('Excel 已导出：图片已真实嵌入文件，不再使用外部链接');
     } catch (error) {
       console.error(error);
       showToast(`Excel 导出失败：${error.message || '未知错误'}`);
@@ -1688,9 +1715,752 @@
       if (button) {
         button.disabled = false;
         button.classList.remove('exporting');
-        button.textContent = originalText || '导出 Excel 表格';
+        button.textContent = originalText || '导出 Excel（嵌入图片）';
       }
     }
+  }
+
+
+  async function buildBatchXlsxWithCellImages(batch) {
+    if (!supabaseClient || !currentUser) {
+      throw new Error('需要登录云端账户才能生成单元格图片链接');
+    }
+    if (!navigator.onLine) {
+      throw new Error('单元格图片版 Excel 需要联网生成图片链接');
+    }
+
+    const zip = new JSZip();
+    const signedPhotos = [];
+    const signedUrlDays = 365;
+    const expiresIn = signedUrlDays * 24 * 60 * 60;
+
+    for (let itemIndex = 0; itemIndex < batch.items.length; itemIndex++) {
+      const item = batch.items[itemIndex];
+      for (let photoIndex = 0; photoIndex < item.photos.length; photoIndex++) {
+        const photoId = item.photos[photoIndex];
+        const url = await createExcelSignedPhotoUrl(photoId, expiresIn);
+        signedPhotos.push({
+          itemIndex,
+          photoIndex,
+          previewRowIndex: signedPhotos.length,
+          url
+        });
+      }
+    }
+
+    const photoLookup = new Map(
+      signedPhotos.map(photo => [`${photo.itemIndex}:${photo.photoIndex}`, photo])
+    );
+    const maxPhotos = Math.max(1, ...batch.items.map(item => item.photos.length));
+    const mainLastColumn = columnName(3 + maxPhotos);
+    const mainLastRow = Math.max(1, batch.items.length + 1);
+    const mainRows = [];
+    const mainLinks = [];
+
+    const headerCells = [
+      inlineCell('A1', 'sku', 1),
+      inlineCell('B1', '日期', 1),
+      inlineCell('C1', '单号', 1),
+      inlineCell('D1', '图片', 1)
+    ];
+
+    for (let imageCol = 1; imageCol < maxPhotos; imageCol++) {
+      headerCells.push(inlineCell(`${columnName(4 + imageCol)}1`, `图片${imageCol + 1}`, 1));
+    }
+
+    mainRows.push(`<row r="1" ht="24" customHeight="1">${headerCells.join('')}</row>`);
+
+    batch.items.forEach((item, itemIndex) => {
+      const rowNumber = itemIndex + 2;
+      const rowCells = [
+        inlineCell(`A${rowNumber}`, item.sku || '', 2),
+        inlineCell(`B${rowNumber}`, formatExportDate(batch.date), 2),
+        inlineCell(`C${rowNumber}`, item.tracking || '', 2)
+      ];
+
+      for (let photoIndex = 0; photoIndex < maxPhotos; photoIndex++) {
+        const reference = `${columnName(4 + photoIndex)}${rowNumber}`;
+        const photo = photoLookup.get(`${itemIndex}:${photoIndex}`);
+
+        if (photo) {
+          rowCells.push(imageFormulaCell(
+            reference,
+            photo.url,
+            `退货${itemIndex + 1}照片${photoIndex + 1}`,
+            2
+          ));
+          mainLinks.push({ ref: reference, url: photo.url });
+        } else {
+          rowCells.push(emptyCell(reference, 2));
+        }
+      }
+
+      mainRows.push(`<row r="${rowNumber}" ht="128" customHeight="1">${rowCells.join('')}</row>`);
+    });
+
+    const mainImageCols = Array.from({ length: maxPhotos }, (_, index) =>
+      `<col min="${4 + index}" max="${4 + index}" width="28" customWidth="1"/>`
+    ).join('');
+
+    const previewRows = [];
+    const previewLinks = [];
+    previewRows.push(`<row r="1" ht="24" customHeight="1">${[
+      inlineCell('A1', 'sku', 1),
+      inlineCell('B1', '日期', 1),
+      inlineCell('C1', '单号', 1),
+      inlineCell('D1', '照片序号', 1),
+      inlineCell('E1', '高清图片（点击可查看原图）', 1)
+    ].join('')}</row>`);
+
+    signedPhotos.forEach((photo, index) => {
+      const item = batch.items[photo.itemIndex];
+      const rowNumber = index + 2;
+      previewRows.push(`<row r="${rowNumber}" ht="300" customHeight="1">${[
+        inlineCell(`A${rowNumber}`, item?.sku || '', 2),
+        inlineCell(`B${rowNumber}`, formatExportDate(batch.date), 2),
+        inlineCell(`C${rowNumber}`, item?.tracking || '', 2),
+        inlineCell(`D${rowNumber}`, String(photo.photoIndex + 1), 2),
+        imageFormulaCell(
+          `E${rowNumber}`,
+          photo.url,
+          `退货${photo.itemIndex + 1}高清照片${photo.photoIndex + 1}`,
+          2
+        )
+      ].join('')}</row>`);
+      previewLinks.push({ ref: `E${rowNumber}`, url: photo.url });
+    });
+
+    if (!signedPhotos.length) {
+      previewRows.push(`<row r="2" ht="34" customHeight="1">${[
+        inlineCell('A2', '', 2),
+        inlineCell('B2', '', 2),
+        inlineCell('C2', '', 2),
+        inlineCell('D2', '', 2),
+        inlineCell('E2', '本退货单暂无照片', 2)
+      ].join('')}</row>`);
+    }
+
+    const previewLastRow = Math.max(2, signedPhotos.length + 1);
+
+    zip.file('[Content_Types].xml', contentTypesForFormulaWorkbookXml());
+    zip.folder('_rels').file('.rels', rootRelationshipsXml());
+    zip.folder('docProps').file('app.xml', appPropertiesXml());
+    zip.folder('docProps').file('core.xml', corePropertiesXml());
+    zip.folder('xl').file('workbook.xml', workbookXmlWithCalculation());
+    zip.folder('xl').folder('_rels').file('workbook.xml.rels', workbookRelationshipsXml());
+    zip.folder('xl').file('styles.xml', stylesXml());
+
+    zip.folder('xl').folder('worksheets').file('sheet1.xml', worksheetXmlWithHyperlinks({
+      dimensions: `A1:${mainLastColumn}${mainLastRow}`,
+      rows: mainRows.join(''),
+      columns: `
+        <col min="1" max="1" width="18" customWidth="1"/>
+        <col min="2" max="2" width="14" customWidth="1"/>
+        <col min="3" max="3" width="24" customWidth="1"/>
+        ${mainImageCols}`,
+      hyperlinks: mainLinks
+    }));
+
+    zip.folder('xl').folder('worksheets').file('sheet2.xml', worksheetXmlWithHyperlinks({
+      dimensions: `A1:E${previewLastRow}`,
+      rows: previewRows.join(''),
+      columns: `
+        <col min="1" max="1" width="18" customWidth="1"/>
+        <col min="2" max="2" width="14" customWidth="1"/>
+        <col min="3" max="3" width="24" customWidth="1"/>
+        <col min="4" max="4" width="12" customWidth="1"/>
+        <col min="5" max="5" width="76" customWidth="1"/>`,
+      hyperlinks: previewLinks
+    }));
+
+    const worksheetRels = zip.folder('xl').folder('worksheets').folder('_rels');
+    if (mainLinks.length) {
+      worksheetRels.file('sheet1.xml.rels', hyperlinkRelationshipsXml(mainLinks));
+    }
+    if (previewLinks.length) {
+      worksheetRels.file('sheet2.xml.rels', hyperlinkRelationshipsXml(previewLinks));
+    }
+
+    return zip.generateAsync({
+      type: 'blob',
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    });
+  }
+
+  async function createExcelSignedPhotoUrl(photoId, expiresIn) {
+    if (!isCloudPhotoPath(photoId)) {
+      throw new Error('检测到旧版本地照片，请先重新上传该照片后再导出单元格图片版 Excel');
+    }
+
+    const { data, error } = await supabaseClient.storage
+      .from(getPhotoBucket())
+      .createSignedUrl(photoId, expiresIn);
+
+    if (error || !data?.signedUrl) {
+      throw new Error(`无法生成照片查看链接：${error?.message || '未知错误'}`);
+    }
+
+    return data.signedUrl;
+  }
+
+  function imageFormulaCell(reference, url, altText, styleId = 0) {
+    const style = styleId ? ` s="${styleId}"` : '';
+    const safeUrl = String(url || '').replaceAll('"', '""');
+    const safeAlt = String(altText || '退货照片').replaceAll('"', '""');
+    const formula = `_xlfn.IMAGE("${safeUrl}","${safeAlt}",0)`;
+    return `<c r="${reference}"${style}><f>${xmlEscape(formula)}</f><v></v></c>`;
+  }
+
+  function contentTypesForFormulaWorkbookXml() {
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>`;
+  }
+
+  function workbookXmlWithCalculation() {
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <bookViews><workbookView xWindow="0" yWindow="0" windowWidth="24000" windowHeight="14000"/></bookViews>
+  <sheets>
+    <sheet name="退货清单" sheetId="1" r:id="rId1"/>
+    <sheet name="高清照片" sheetId="2" r:id="rId2"/>
+  </sheets>
+  <calcPr calcId="191029" calcMode="auto" fullCalcOnLoad="1" forceFullCalc="1"/>
+</workbook>`;
+  }
+
+  function worksheetXmlWithHyperlinks({ dimensions, rows, columns, hyperlinks }) {
+    const hyperlinkXml = hyperlinks.length
+      ? `<hyperlinks>${hyperlinks.map((link, index) =>
+          `<hyperlink ref="${link.ref}" r:id="rId${index + 1}" tooltip="点击查看原图"/>`
+        ).join('')}</hyperlinks>`
+      : '';
+
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="${dimensions}"/>
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>
+  <sheetFormatPr defaultRowHeight="15"/>
+  <cols>${columns}</cols>
+  <sheetData>${rows}</sheetData>
+  ${hyperlinkXml}
+  <pageMargins left="0.25" right="0.25" top="0.5" bottom="0.5" header="0.2" footer="0.2"/>
+</worksheet>`;
+  }
+
+  function hyperlinkRelationshipsXml(links) {
+    const relationships = links.map((link, index) =>
+      `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${xmlEscape(link.url)}" TargetMode="External"/>`
+    ).join('');
+
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationships}</Relationships>`;
+  }
+
+
+
+  async function syncBatchToTencentApi(batchId, button = null) {
+    const batch = batches.find(candidate => candidate.id === batchId);
+    if (!batch) return;
+
+    const originalText = button?.textContent;
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在同步…';
+    }
+
+    try {
+      const photos = [];
+      for (const item of batch.items || []) {
+        for (let index = 0; index < (item.photos || []).length; index++) {
+          const photoId = item.photos[index];
+          let signedUrl = '';
+          if (isCloudPhotoPath(photoId)) {
+            const { data, error } = await supabaseClient.storage
+              .from(getPhotoBucket())
+              .createSignedUrl(photoId, 60 * 30);
+            if (!error && data?.signedUrl) signedUrl = data.signedUrl;
+          }
+          photos.push({ itemId: item.id, photoIndex: index, path: photoId, signedUrl });
+        }
+      }
+
+      const response = await fetch('/api/tencent/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ batch, photos })
+      });
+
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result.message || result.error || '腾讯文档接口未配置');
+      }
+
+      if (result.url) {
+        window.open(result.url, '_blank');
+      }
+      showToast('已同步到腾讯文档');
+    } catch (error) {
+      console.error(error);
+      alert(
+        '腾讯文档 API 同步暂未完成配置。\n\n' +
+        '需要先申请腾讯文档开放平台应用，并在 Vercel 环境变量中配置 AppID、AppSecret、OAuth 回调和访问令牌。\n\n' +
+        `当前提示：${error.message || '接口未配置'}`
+      );
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = originalText || '同步到腾讯文档API';
+      }
+    }
+  }
+
+  function isRemoteCameraClientUrl() {
+    const params = new URLSearchParams(location.search);
+    return params.get('remoteCamera') === '1';
+  }
+
+  function getRemoteCameraParams() {
+    const params = new URLSearchParams(location.search);
+    return {
+      session: params.get('session') || '',
+      batchId: params.get('batch') || '',
+      itemIndex: Number(params.get('item') || 0)
+    };
+  }
+
+  async function openRemoteCameraDialog() {
+    if (!supabaseClient || !currentUser) {
+      showToast('请先登录账户');
+      return;
+    }
+    const batch = getActiveBatch();
+    const item = getActiveItem();
+    if (!batch || !item) {
+      showToast('请先进入退货任务');
+      return;
+    }
+
+    closeRemoteCameraDesktopSession();
+    remoteCameraSession = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const url = new URL(location.origin + location.pathname);
+    url.searchParams.set('remoteCamera', '1');
+    url.searchParams.set('session', remoteCameraSession);
+    url.searchParams.set('batch', batch.id);
+    url.searchParams.set('item', String(activeItemIndex));
+
+    els.remoteCameraLink.value = url.toString();
+    els.remoteCameraStatus.textContent = '等待手机打开链接并启动摄像头…';
+    els.remoteCaptureBtn.disabled = true;
+    els.remoteCameraDialog.showModal();
+
+    remoteCameraChannel = supabaseClient.channel(`k8-remote-camera-${remoteCameraSession}`, {
+      config: { broadcast: { self: false } }
+    });
+
+    remoteCameraChannel
+      .on('broadcast', { event: 'client-ready' }, payload => {
+        els.remoteCameraStatus.textContent = `手机已连接：${payload.payload?.device || '移动设备'}`;
+        els.remoteCaptureBtn.disabled = false;
+      })
+      .on('broadcast', { event: 'capture-started' }, () => {
+        els.remoteCameraStatus.textContent = '手机正在拍照并上传…';
+        els.remoteCaptureBtn.disabled = true;
+      })
+      .on('broadcast', { event: 'photo-saved' }, async payload => {
+        els.remoteCameraStatus.textContent = `照片已保存：${payload.payload?.count || ''}`;
+        await loadCloudBatches({ preserveOpenBatch: true });
+        activeItemIndex = Number(new URL(els.remoteCameraLink.value).searchParams.get('item') || activeItemIndex);
+        renderBatch();
+        els.remoteCaptureBtn.disabled = false;
+        showToast('手机照片已同步到当前退货任务');
+      })
+      .on('broadcast', { event: 'remote-error' }, payload => {
+        els.remoteCameraStatus.textContent = `手机端错误：${payload.payload?.message || '未知错误'}`;
+        els.remoteCaptureBtn.disabled = false;
+      });
+
+    await remoteCameraChannel.subscribe(status => {
+      if (status === 'SUBSCRIBED') {
+        els.remoteCameraStatus.textContent = '配对通道已开启，等待手机连接…';
+      }
+    });
+  }
+
+  async function copyRemoteCameraLink() {
+    const link = els.remoteCameraLink.value;
+    if (!link) return;
+    try {
+      await navigator.clipboard.writeText(link);
+      showToast('手机连接已复制，请发送到手机打开');
+    } catch {
+      els.remoteCameraLink.select();
+      document.execCommand('copy');
+      showToast('已选中链接，请手动复制');
+    }
+  }
+
+  async function sendRemoteCaptureCommand() {
+    if (!remoteCameraChannel || !remoteCameraSession) return;
+    els.remoteCaptureBtn.disabled = true;
+    els.remoteCameraStatus.textContent = '已发送拍照指令，等待手机上传…';
+    await remoteCameraChannel.send({
+      type: 'broadcast',
+      event: 'capture',
+      payload: { at: Date.now() }
+    });
+  }
+
+  function closeRemoteCameraDesktopSession() {
+    if (remoteCameraChannel && supabaseClient) {
+      supabaseClient.removeChannel(remoteCameraChannel);
+    }
+    remoteCameraChannel = null;
+    remoteCameraSession = null;
+  }
+
+  async function startRemoteCameraClientFromUrl() {
+    const config = getRemoteCameraParams();
+    if (!config.session || !config.batchId) return;
+    showAppShell();
+    els.remoteCameraClientScreen.classList.remove('hidden');
+    document.body.classList.add('dialog-open');
+    els.remoteClientStatus.textContent = '正在连接电脑端…';
+
+    if (!remoteClientChannel) {
+      remoteClientChannel = supabaseClient.channel(`k8-remote-camera-${config.session}`, {
+        config: { broadcast: { self: false } }
+      });
+      remoteClientChannel
+        .on('broadcast', { event: 'capture' }, () => remoteClientCaptureAndUpload('desktop-command'));
+      await remoteClientChannel.subscribe(async status => {
+        if (status === 'SUBSCRIBED') {
+          els.remoteClientStatus.textContent = '已连接电脑端。请点击“启动手机摄像头”。';
+          await remoteClientChannel.send({
+            type: 'broadcast',
+            event: 'client-ready',
+            payload: { device: navigator.userAgent.includes('iPhone') ? 'iPhone' : '手机' }
+          });
+        }
+      });
+    }
+  }
+
+  async function startRemoteClientCamera() {
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('当前手机浏览器不支持实时摄像头');
+      if (remoteClientStream) remoteClientStream.getTracks().forEach(track => track.stop());
+      remoteClientStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false
+      });
+      els.remoteClientVideo.srcObject = remoteClientStream;
+      await els.remoteClientVideo.play();
+      els.remoteClientTestBtn.disabled = false;
+      els.remoteClientStatus.textContent = '手机摄像头已启动。等待电脑端拍照指令…';
+      if (remoteClientChannel) {
+        await remoteClientChannel.send({ type: 'broadcast', event: 'client-ready', payload: { device: '手机摄像头已启动' } });
+      }
+    } catch (error) {
+      els.remoteClientStatus.textContent = error.message || '无法启动手机摄像头';
+      if (remoteClientChannel) {
+        await remoteClientChannel.send({ type: 'broadcast', event: 'remote-error', payload: { message: els.remoteClientStatus.textContent } });
+      }
+    }
+  }
+
+  async function remoteClientCaptureAndUpload(reason = 'capture') {
+    const config = getRemoteCameraParams();
+    if (!remoteClientStream) {
+      await startRemoteClientCamera();
+      if (!remoteClientStream) return;
+    }
+
+    const video = els.remoteClientVideo;
+    const canvas = els.remoteClientCanvas;
+    if (!video.videoWidth || !video.videoHeight) {
+      els.remoteClientStatus.textContent = '摄像头画面尚未准备好';
+      return;
+    }
+
+    try {
+      if (remoteClientChannel) {
+        await remoteClientChannel.send({ type: 'broadcast', event: 'capture-started', payload: { reason } });
+      }
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const context = canvas.getContext('2d', { alpha: false });
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise((resolve, reject) => canvas.toBlob(
+        value => value ? resolve(value) : reject(new Error('手机照片保存失败')),
+        'image/jpeg',
+        0.92
+      ));
+
+      const batch = batches.find(candidate => candidate.id === config.batchId);
+      if (!batch) throw new Error('手机端没有找到目标退货单，请确认登录同一账户');
+      const item = batch.items[config.itemIndex];
+      if (!item) throw new Error('手机端没有找到目标退货任务');
+
+      activeBatchId = batch.id;
+      const oldIndex = activeItemIndex;
+      activeItemIndex = config.itemIndex;
+      const id = makePhotoId(item.id);
+      activeItemIndex = oldIndex;
+      await putPhoto(id, blob);
+      item.photos.push(id);
+      item.processedAt = null;
+      batch.completedAt = null;
+      batch.updatedAt = new Date().toISOString();
+      saveBatches();
+      await flushCloudSync();
+      els.remoteClientStatus.textContent = `已上传照片，本件共 ${item.photos.length} 张`;
+      if (remoteClientChannel) {
+        await remoteClientChannel.send({ type: 'broadcast', event: 'photo-saved', payload: { count: item.photos.length } });
+      }
+    } catch (error) {
+      console.error(error);
+      els.remoteClientStatus.textContent = error.message || '远程拍照失败';
+      if (remoteClientChannel) {
+        await remoteClientChannel.send({ type: 'broadcast', event: 'remote-error', payload: { message: els.remoteClientStatus.textContent } });
+      }
+    }
+  }
+
+  function exitRemoteCameraClient() {
+    if (remoteClientStream) remoteClientStream.getTracks().forEach(track => track.stop());
+    remoteClientStream = null;
+    if (remoteClientChannel && supabaseClient) supabaseClient.removeChannel(remoteClientChannel);
+    remoteClientChannel = null;
+    const url = new URL(location.href);
+    ['remoteCamera', 'session', 'batch', 'item'].forEach(key => url.searchParams.delete(key));
+    location.href = url.origin + url.pathname;
+  }
+
+  async function exportTencentUploadWorkbook(batchId, button = null) {
+    const batch = batches.find(candidate => candidate.id === batchId);
+    if (!batch) return;
+    if (!window.JSZip) {
+      showToast('Excel 导出组件未加载，请重新打开系统');
+      return;
+    }
+
+    const originalText = button?.textContent;
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在生成上传版…';
+    }
+
+    showToast('正在生成腾讯文档上传版 Excel…');
+
+    try {
+      const workbookBlob = await buildBatchXlsx(batch);
+      const safeClient = sanitiseFilename(batch.client || '客户');
+      const safeDate = String(batch.date || toDateInput(new Date())).replaceAll('-', '');
+      downloadBlob(workbookBlob, `${safeClient}_${safeDate}_腾讯文档上传版.xlsx`);
+      showToast('已导出。请在腾讯文档选择“导入本地表格”上传此文件');
+      alert(
+        '已生成“腾讯文档上传版.xlsx”。\n\n' +
+        '推荐操作：\n' +
+        '1. 打开腾讯文档；\n' +
+        '2. 新建或打开共享表格；\n' +
+        '3. 选择“导入 / 上传本地表格”；\n' +
+        '4. 上传刚下载的 xlsx 文件。\n\n' +
+        '不要再从 Excel 复制图片到腾讯文档，腾讯文档对图片剪贴板兼容很不稳定。'
+      );
+    } catch (error) {
+      console.error(error);
+      showToast(`腾讯文档上传版导出失败：${error.message || '未知错误'}`);
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = originalText || '导出腾讯文档上传版';
+      }
+    }
+  }
+
+  async function copyBatchToTencentDocs(batchId, button = null) {
+    const batch = batches.find(candidate => candidate.id === batchId);
+    if (!batch) return;
+
+    const originalText = button?.textContent;
+    if (button) {
+      button.disabled = true;
+      button.textContent = '正在整理图片…';
+    }
+
+    showToast('正在生成腾讯文档可粘贴表格…');
+
+    try {
+      const html = await buildTencentClipboardHtml(batch);
+      const plainText = buildTencentPlainText(batch);
+      let copied = false;
+
+      if (navigator.clipboard?.write && window.ClipboardItem) {
+        try {
+          const item = new ClipboardItem({
+            'text/html': new Blob([html], { type: 'text/html' }),
+            'text/plain': new Blob([plainText], { type: 'text/plain' })
+          });
+          await navigator.clipboard.write([item]);
+          copied = true;
+        } catch (error) {
+          console.warn('Rich clipboard copy failed:', error);
+        }
+      }
+
+      if (copied) {
+        showToast('已复制。请在腾讯文档表格中选中 A1 后粘贴');
+        alert(
+          '已复制带图片的表格。\n\n' +
+          '请打开腾讯共享表格，选中左上角 A1 单元格，然后按 Command+V（Windows按 Ctrl+V）。\n\n' +
+          '如果腾讯文档只粘贴了文字，请使用刚下载的“腾讯文档复制版.html”进行全选复制。'
+        );
+      } else {
+        showToast('浏览器未允许富文本复制，已下载腾讯文档复制版 HTML');
+      }
+
+      // Always provide a self-contained fallback because clipboard support differs by browser.
+      const safeClient = sanitiseFilename(batch.client || '客户');
+      const safeDate = String(batch.date || toDateInput(new Date())).replaceAll('-', '');
+      downloadBlob(
+        new Blob([buildTencentStandaloneHtml(batch, html)], { type: 'text/html;charset=utf-8' }),
+        `${safeClient}_${safeDate}_腾讯文档复制版.html`
+      );
+    } catch (error) {
+      console.error(error);
+      showToast(`腾讯文档复制失败：${error.message || '未知错误'}`);
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = originalText || '导出腾讯文档上传版';
+      }
+    }
+  }
+
+  async function buildTencentClipboardHtml(batch) {
+    const maxPhotos = Math.max(1, ...batch.items.map(item => item.photos.length));
+    const rows = [];
+
+    const header = ['sku', '日期', '单号'];
+    for (let index = 0; index < maxPhotos; index++) {
+      header.push(index === 0 ? '图片' : `图片${index + 1}`);
+    }
+
+    rows.push(`<tr>${header.map(value =>
+      `<th style="border:1px solid #cbd5e1;padding:8px;background:#76d7f0;text-align:center;">${escapeHtml(value)}</th>`
+    ).join('')}</tr>`);
+
+    for (const item of batch.items) {
+      const cells = [
+        `<td style="border:1px solid #cbd5e1;padding:8px;text-align:center;">${escapeHtml(item.sku || '')}</td>`,
+        `<td style="border:1px solid #cbd5e1;padding:8px;text-align:center;">${escapeHtml(formatExportDate(batch.date))}</td>`,
+        `<td style="border:1px solid #cbd5e1;padding:8px;text-align:center;">${escapeHtml(item.tracking || '')}</td>`
+      ];
+
+      for (let photoIndex = 0; photoIndex < maxPhotos; photoIndex++) {
+        const photoId = item.photos[photoIndex];
+        if (!photoId) {
+          cells.push('<td style="border:1px solid #cbd5e1;width:190px;height:150px;"></td>');
+          continue;
+        }
+
+        const blob = await getPhoto(photoId);
+        if (!blob) {
+          cells.push('<td style="border:1px solid #cbd5e1;padding:8px;color:#b42318;">图片读取失败</td>');
+          continue;
+        }
+
+        const dataUrl = await createTencentThumbnailDataUrl(blob);
+        cells.push(
+          `<td style="border:1px solid #cbd5e1;padding:6px;width:190px;height:150px;text-align:center;vertical-align:middle;">` +
+          `<img src="${dataUrl}" alt="退货照片" width="180" style="display:block;max-width:180px;max-height:140px;margin:auto;object-fit:contain;" />` +
+          `</td>`
+        );
+      }
+
+      rows.push(`<tr>${cells.join('')}</tr>`);
+    }
+
+    return `<table style="border-collapse:collapse;font-family:Arial,'Microsoft YaHei',sans-serif;font-size:14px;">${rows.join('')}</table>`;
+  }
+
+  function buildTencentPlainText(batch) {
+    const maxPhotos = Math.max(1, ...batch.items.map(item => item.photos.length));
+    const header = ['sku', '日期', '单号', ...Array.from(
+      { length: maxPhotos },
+      (_, index) => index === 0 ? '图片' : `图片${index + 1}`
+    )];
+
+    const rows = batch.items.map(item => [
+      item.sku || '',
+      formatExportDate(batch.date),
+      item.tracking || '',
+      ...Array.from({ length: maxPhotos }, (_, index) =>
+        item.photos[index] ? `[照片${index + 1}]` : ''
+      )
+    ]);
+
+    return [header, ...rows]
+      .map(row => row.map(value => String(value ?? '').replaceAll('\t', ' ')).join('\t'))
+      .join('\n');
+  }
+
+  async function createTencentThumbnailDataUrl(blob) {
+    const source = await loadImageSource(blob);
+    const width = Number(source.width || source.naturalWidth || 1);
+    const height = Number(source.height || source.naturalHeight || 1);
+    const maxWidth = 720;
+    const maxHeight = 560;
+    const fitted = fitImageWithin(width, height, maxWidth, maxHeight);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = fitted.width;
+    canvas.height = fitted.height;
+
+    const context = canvas.getContext('2d', { alpha: false });
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
+
+    if (typeof source.close === 'function') source.close();
+
+    return canvas.toDataURL('image/jpeg', 0.88);
+  }
+
+  function buildTencentStandaloneHtml(batch, tableHtml) {
+    return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(batch.client || '客户')} 腾讯文档复制版</title>
+<style>
+body{font-family:Arial,"Microsoft YaHei",sans-serif;margin:24px;background:#f6f7f9;color:#111827}
+main{max-width:1400px;margin:auto;background:#fff;padding:24px;border-radius:16px}
+h1{margin:0 0 8px}.note{color:#6b7280;margin-bottom:20px}
+table{width:max-content;min-width:100%}img{cursor:zoom-in}
+@media print{body{background:#fff;margin:0}main{box-shadow:none;padding:0}}
+</style>
+</head>
+<body>
+<main>
+<h1>${escapeHtml(batch.name || '退货处理')}</h1>
+<p class="note">使用方法：按 Command+A、Command+C，然后在腾讯文档表格的 A1 单元格粘贴。图片已嵌入此文件。</p>
+${tableHtml}
+</main>
+</body>
+</html>`;
   }
 
   async function buildBatchXlsx(batch) {
@@ -1748,7 +2518,7 @@
     });
 
     const mainImageCols = Array.from({ length: maxPhotos }, (_, index) =>
-      `<col min="${4 + index}" max="${4 + index}" width="25.5" customWidth="1"/>`
+      `<col min="${4 + index}" max="${4 + index}" width="28" customWidth="1"/>`
     ).join('');
 
     // The second worksheet is a full-size gallery. One image per row avoids tiny thumbnails
@@ -1977,33 +2747,43 @@
       const row = isPreview ? 1 + image.previewRowIndex : 1 + image.itemIndex;
       const relId = index + 1;
       const shapeId = index + 2;
-      const boxWidth = isPreview ? 510 : 174;
-      const boxHeight = isPreview ? 390 : 160;
+
+      // These dimensions match the generated column widths/row heights.
+      const boxWidth = isPreview ? 510 : 190;
+      const boxHeight = isPreview ? 390 : 165;
       const padding = isPreview ? 10 : 6;
+
       const fitted = fitImageWithin(
         image.width || 1,
         image.height || 1,
         boxWidth - padding * 2,
         boxHeight - padding * 2
       );
+
       const xOffsetPx = padding + Math.max(0, (boxWidth - padding * 2 - fitted.width) / 2);
       const yOffsetPx = padding + Math.max(0, (boxHeight - padding * 2 - fitted.height) / 2);
-      const cx = Math.round(fitted.width * 9525);
-      const cy = Math.round(fitted.height * 9525);
+      const toXOffsetPx = xOffsetPx + fitted.width;
+      const toYOffsetPx = yOffsetPx + fitted.height;
+
       const xOffset = Math.round(xOffsetPx * 9525);
       const yOffset = Math.round(yOffsetPx * 9525);
+      const toXOffset = Math.round(toXOffsetPx * 9525);
+      const toYOffset = Math.round(toYOffsetPx * 9525);
       const description = xmlEscape(`退货 ${image.itemIndex + 1} 照片 ${image.photoIndex + 1}`);
 
-      return `<xdr:oneCellAnchor>
+      // twoCellAnchor with editAs="twoCell" makes Excel treat the picture
+      // as moving and resizing with the cell area. It is much more stable
+      // than external IMAGE() links and avoids #BLOCKED!.
+      return `<xdr:twoCellAnchor editAs="twoCell">
   <xdr:from><xdr:col>${col}</xdr:col><xdr:colOff>${xOffset}</xdr:colOff><xdr:row>${row}</xdr:row><xdr:rowOff>${yOffset}</xdr:rowOff></xdr:from>
-  <xdr:ext cx="${cx}" cy="${cy}"/>
+  <xdr:to><xdr:col>${col}</xdr:col><xdr:colOff>${toXOffset}</xdr:colOff><xdr:row>${row}</xdr:row><xdr:rowOff>${toYOffset}</xdr:rowOff></xdr:to>
   <xdr:pic>
     <xdr:nvPicPr><xdr:cNvPr id="${shapeId}" name="Picture ${relId}" descr="${description}"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>
     <xdr:blipFill><a:blip r:embed="rId${relId}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
-    <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
+    <xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${Math.round(fitted.width * 9525)}" cy="${Math.round(fitted.height * 9525)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>
   </xdr:pic>
   <xdr:clientData/>
-</xdr:oneCellAnchor>`;
+</xdr:twoCellAnchor>`;
     }).join('');
 
     return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -2516,6 +3296,10 @@
       await loadCloudBatches();
       await maybeImportLocalData();
       subscribeToCloudChanges();
+    }
+
+    if (isRemoteCameraClientUrl()) {
+      await startRemoteCameraClientFromUrl();
     }
 
     setCloudStatus(

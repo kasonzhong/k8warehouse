@@ -9,7 +9,7 @@
   <link rel="icon" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
   <link rel="stylesheet" href="styles.css" />
-  <title>K8 退货处理系统 V9 共享权限版</title>
+  <title>K8 退货处理系统 V12</title>
 </head>
 <body>
 
@@ -386,6 +386,57 @@
     </div>
   </dialog>
 
+
+  <dialog id="remoteCameraDialog" class="remote-camera-dialog">
+    <div class="dialog-card remote-camera-card">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">PHONE CAMERA</p>
+          <h2>手机作为电脑摄像头</h2>
+        </div>
+        <button type="button" class="icon-btn" data-close="remoteCameraDialog" aria-label="关闭">×</button>
+      </div>
+      <div class="remote-camera-layout">
+        <section class="remote-camera-panel">
+          <h3>1. 用手机打开这个链接</h3>
+          <p class="muted">手机和电脑登录同一个账户。手机打开后保持页面亮屏，作为远程摄像头使用。</p>
+          <textarea id="remoteCameraLink" readonly rows="4"></textarea>
+          <div class="dialog-actions compact-actions">
+            <button id="copyRemoteCameraLinkBtn" class="secondary-btn" type="button">复制手机链接</button>
+            <button id="openRemoteCameraLinkBtn" class="secondary-btn" type="button">新窗口打开</button>
+          </div>
+        </section>
+        <section class="remote-camera-panel">
+          <h3>2. 电脑端远程拍照</h3>
+          <p id="remoteCameraStatus" class="muted">等待手机连接…</p>
+          <button id="remoteCaptureBtn" class="primary-btn large-action" type="button" disabled>电脑点击，手机拍照</button>
+          <p class="auth-note">远程拍照通过 Supabase Realtime 发送指令；照片仍上传到当前退货任务。</p>
+        </section>
+      </div>
+    </div>
+  </dialog>
+
+  <section id="remoteCameraClientScreen" class="remote-client-screen hidden">
+    <div class="remote-client-card">
+      <div class="auth-brand">
+        <img src="icons/icon-192.png" alt="K8" />
+        <div>
+          <p class="eyebrow">REMOTE CAMERA CLIENT</p>
+          <h1>手机摄像头模式</h1>
+          <p id="remoteClientStatus">正在连接电脑端…</p>
+        </div>
+      </div>
+      <video id="remoteClientVideo" autoplay playsinline muted></video>
+      <canvas id="remoteClientCanvas" class="hidden"></canvas>
+      <div class="remote-client-actions">
+        <button id="remoteClientStartBtn" class="primary-btn" type="button">启动手机摄像头</button>
+        <button id="remoteClientTestBtn" class="secondary-btn" type="button" disabled>手机本地试拍</button>
+        <button id="remoteClientExitBtn" class="secondary-btn" type="button">退出摄像头模式</button>
+      </div>
+      <p class="auth-note">电脑端点击“手机拍照”时，本页面会自动截取当前手机画面并上传到退货单。</p>
+    </div>
+  </section>
+
   <dialog id="labelDialog">
     <div class="dialog-card">
       <div class="dialog-head">
@@ -430,7 +481,9 @@
         <div class="mini-progress"><span></span></div>
         <small class="batch-step-label"></small>
         <button class="open-batch-btn primary-btn">开始处理</button>
-        <button class="export-batch-btn secondary-btn">导出 Excel 表格</button>
+        <button class="export-batch-btn secondary-btn">导出 Excel（嵌入图片）</button>
+        <button class="tencent-copy-btn secondary-btn">导出腾讯文档上传版</button>
+        <button class="tencent-api-btn secondary-btn">同步到腾讯文档API</button>
         <button class="share-batch-btn secondary-btn">共享权限</button>
         <button class="delete-card-btn danger-btn">删除退货单</button>
       </div>
@@ -441,7 +494,7 @@
 
   <script src="jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="supabase-config.js?v=9.0.0"></script>
-  <script src="app.js?v=9.0.0"></script>
+  <script src="supabase-config.js?v=12.0.0"></script>
+  <script src="app.js?v=12.0.0"></script>
 </body>
 </html>

@@ -1,6 +1,10 @@
-V9跨账户共享补丁
+K8 V12 补丁
 
-1. 先在Supabase SQL Editor运行 supabase-setup-v9.sql。
-2. 将其余文件复制到GitHub本地仓库根目录并替换。
-3. 不要覆盖现有的 supabase-config.js。
-4. Commit to main → Push origin → 等待Vercel Ready。
+复制本补丁中的所有文件和 api 文件夹到本地 GitHub 仓库根目录并选择替换。
+
+不会覆盖 supabase-config.js。
+
+GitHub Desktop Summary:
+Add Tencent API bridge and remote phone camera
+
+Commit to main -> Push origin。

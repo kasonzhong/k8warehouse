@@ -1,9 +1,9 @@
-const CACHE_NAME = 'k8-sharing-v9';
+const CACHE_NAME = 'k8-tencent-api-phone-camera-v12';
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
-  './app.js?v=9.0.0',
+  './app.js?v=12.0.0',
   './jszip.min.js',
   './manifest.json',
   './icons/icon-192.png',
